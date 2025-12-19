@@ -468,7 +468,7 @@ ggml_tensor * clip_graph::build_inp() {
 }
 
 ggml_tensor * clip_graph::build_inp_raw(int channels) {
-    ggml_tensor * inp_raw = ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, img.nx, img.ny, channels);
+    ggml_tensor * inp_raw = ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, img.nx, img.ny, img.nz * channels);
     ggml_set_name(inp_raw, "inp_raw");
     ggml_set_input(inp_raw);
     return inp_raw;
@@ -776,6 +776,10 @@ static ggml_cgraph * clip_image_build_graph(clip_ctx * ctx, const clip_image_f32
     GGML_ASSERT(imgs.entries.size() == 1 && "n_batch > 1 is not supported");
 
     const clip_image_f32 & img = *imgs.entries[0];
+    clip_image_f32 orig_img;
+    if (imgs.entries.size() == 2) {
+        orig_img = *imgs.entries[1];
+    }
     std::unique_ptr<clip_graph> builder;
 
     switch (ctx->proj_type()) {
@@ -837,8 +841,9 @@ static ggml_cgraph * clip_image_build_graph(clip_ctx * ctx, const clip_image_f32
             } break;
         case PROJECTOR_TYPE_DEEPSEEKOCR:
             {
-                builder = std::make_unique<clip_graph_deepseekocr>(ctx, img);
-            } break;
+                builder = std::make_unique<clip_graph_deepseekocr>(ctx, img, orig_img);
+            }
+            break;
         case PROJECTOR_TYPE_GLM4V:
             {
                 builder = std::make_unique<clip_graph_glm4v>(ctx, img);

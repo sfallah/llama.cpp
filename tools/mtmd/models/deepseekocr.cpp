@@ -93,6 +93,9 @@ ggml_cgraph * clip_graph_deepseekocr::build() {
     ggml_tensor * inp_raw = build_inp_raw();
 
     ggml_tensor * sam_out;
+
+    const int has_global_view = (orig_img.nz != 0 and orig_img.ny !=0) ? std::max(orig_img.nx, orig_img.ny) : 0;
+
     // Building SAM
     {
         const int n_embd  = hparams.sam_n_embd;

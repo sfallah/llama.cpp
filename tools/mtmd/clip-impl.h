@@ -234,6 +234,7 @@ static projector_type clip_projector_type_from_string(const std::string & str) {
 struct clip_image_u8 {
     int nx;
     int ny;
+    int nz; // batch size
 
     std::vector<uint8_t> buf;
 };
@@ -245,6 +246,7 @@ struct clip_image_u8 {
 struct clip_image_f32 {
     int nx;
     int ny;
+    int nz = 1; // batch size
 
     std::vector<float> buf;
 };
