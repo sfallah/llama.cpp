@@ -88,16 +88,7 @@ static ggml_tensor * get_rel_pos(ggml_context * ctx0,
     return cur;  // [C, k_size, q_size]
 }
 
-ggml_cgraph * clip_graph_deepseekocr::build() {
-    // patch embedding
-    ggml_tensor * inp_raw = build_inp_raw();
-
-    ggml_tensor * sam_out;
-
-    const int has_global_view = (orig_img.nz != 0 and orig_img.ny !=0) ? std::max(orig_img.nx, orig_img.ny) : 0;
-
-    // Building SAM
-    {
+ggml_tensor * clip_graph_deepseekocr::build_sam(ggml_tensor * inp_raw) {
         const int n_embd  = hparams.sam_n_embd;
         const int n_layer = hparams.sam_n_layer;
         const int n_heads = hparams.sam_n_head;
@@ -247,7 +238,19 @@ ggml_cgraph * clip_graph_deepseekocr::build() {
         cb(cur, "sam_output", -1);
 
         ggml_build_forward_expand(gf, cur);
-        sam_out = cur;
+        return cur;
+}
+
+
+ggml_cgraph * clip_graph_deepseekocr::build() {
+    // patch embedding
+    ggml_tensor * inp_raw = build_inp_raw();
+
+    const int has_global_view = (orig_img.nz != 0 and orig_img.ny !=0) ? std::max(orig_img.nx, orig_img.ny) : 0;
+    ggml_tensor * sam_out;
+    // Building SAM
+    {
+        sam_out = build_sam(inp_raw);
     }
 
     ggml_tensor * clip_out;
