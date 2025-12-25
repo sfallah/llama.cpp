@@ -1122,6 +1122,7 @@ class TensorNameMap:
             "classifier.dense", # roberta
             "pre_classifier",   # distillbert
             "dense",            # neobert
+            "score"             # llama-embed
         ),
 
         MODEL_TENSOR.CLS_OUT: (

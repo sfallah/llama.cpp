@@ -521,6 +521,7 @@ static std::set<llm_tensor> llm_get_tensor_names(llm_arch arch) {
                 LLM_TENSOR_FFN_GATE_EXPS,
                 LLM_TENSOR_FFN_DOWN_EXPS,
                 LLM_TENSOR_FFN_UP_EXPS,
+                LLM_TENSOR_CLS
             };
         case LLM_ARCH_ARCEE:
         case LLM_ARCH_STARCODER2:
