@@ -64,6 +64,7 @@ struct clip_graph_deepseekocr : public clip_graph {
         clip_graph(ctx, img),
         orig_img(std::move(orig_img)) {}
     ggml_tensor * build_sam(ggml_tensor * inp_raw);
+    ggml_tensor * build_clip(ggml_tensor * inp_raw);
     ggml_cgraph * build() override;
 
 
