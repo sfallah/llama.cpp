@@ -7105,10 +7105,14 @@ class ConformerAudioModel(MmprojModel):
 
 @ModelBase.register("DeepseekOCRForCausalLM")
 class DeepseekOCRVisionModel(MmprojModel):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.clip_projector_type = gguf.VisionProjectorType.DEEPSEEKOCR
+
     def set_gguf_parameters(self):
         super().set_gguf_parameters()
         hparams = self.hparams
-        self.gguf_writer.add_clip_projector_type(gguf.VisionProjectorType.DEEPSEEKOCR)
+        self.gguf_writer.add_clip_projector_type(self.clip_projector_type)
         # default values below are taken from HF tranformers code
         self.gguf_writer.add_vision_attention_layernorm_eps(hparams.get("layer_norm_eps", 1e-6))
         self.gguf_writer.add_vision_use_gelu(True)
@@ -7138,20 +7142,21 @@ class DeepseekOCRVisionModel(MmprojModel):
             raise ValueError("DeepseekOCR model requires 'vision_config' in the model configuration, but it was not found")
 
         vision_config['sam'] = vision_config['width']['sam_vit_b']
-        vision_config.update(vision_config['width']['clip-l-14-224'])
-        vision_config['hidden_size'] = vision_config['width']
-        vision_config['num_heads'] = vision_config['heads']
-        vision_config['intermediate_size'] = vision_config['heads'] * 4
+        if vision_config['width'].get('clip-l-14-224') is not None:
+            vision_config.update(vision_config['width']['clip-l-14-224'])
+        if isinstance(vision_config['width'], int):
+            vision_config['hidden_size'] = vision_config['width']
+        if vision_config.get('heads') is not None:
+            vision_config['num_heads'] = vision_config['heads']
+            vision_config['intermediate_size'] = vision_config['heads'] * 4
 
         return vision_config
 
     def tensor_force_quant(self, name, new_name, bid, n_dims):
-        if ".embeddings." in name or 'pos_embed' in name:
-            return gguf.GGMLQuantizationType.F32
-        if ".rel_pos_h" in name or '.rel_pos_w' in name:
-            return gguf.GGMLQuantizationType.F32
-        if ".neck." in name or ".net_" in name:
-            return gguf.GGMLQuantizationType.F32
+        nq_names = ['.embeddings.', 'pos_embed', '.rel_pos_h', '.rel_pos_w', '.neck.', '.net_']
+        for nq_name in nq_names:
+            if nq_name in name:
+                return gguf.GGMLQuantizationType.F32
         return super().tensor_force_quant(name, new_name, bid, n_dims)
 
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
@@ -7165,6 +7170,25 @@ class DeepseekOCRVisionModel(MmprojModel):
             name += ".weight"
 
         yield from super().modify_tensors(data_torch, name, bid)
+
+
+@ModelBase.register("DeepseekOCR2ForCausalLM")
+class DeepseekOCR2VisionModel(DeepseekOCRVisionModel):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.clip_projector_type = gguf.VisionProjectorType.DEEPSEEKOCR2
+    def set_gguf_parameters(self):
+        self.hparams["patch_size"] = 16 if self.hparams.get("patch_size") is None else self.hparams["patch_size"]
+        self.hparams["intermediate_size"] = 11008 if self.hparams.get("intermediate_size") is None else self.hparams["intermediate_size"]
+        self.hparams["num_attention_heads"] = self.global_config["num_attention_heads"] if self.hparams.get("num_attention_heads") is None else self.hparams["num_attention_heads"]
+        super().set_gguf_parameters()
+
+    def get_vision_config(self) -> dict[str, Any]:
+        vision_config = super().get_vision_config()
+        vision_config['hidden_size'] = vision_config['width']['qwen2-0-5b']['dim']
+        if vision_config.get('layers') is None:
+            vision_config['layers'] = 24
+        return vision_config
 
 
 @ModelBase.register("Gemma3nForConditionalGeneration")
@@ -8518,7 +8542,7 @@ class DeepseekV2Model(TextModel):
         self.origin_hf_arch = hparams.get('architectures', [None])[0]
 
         # special handling for Deepseek OCR
-        if self.origin_hf_arch == "DeepseekOCRForCausalLM":
+        if self.origin_hf_arch in ["DeepseekOCRForCausalLM", "DeepseekOCR2ForCausalLM"]:
             self.model_arch = gguf.MODEL_ARCH.DEEPSEEK2OCR
             self.gguf_writer.arch = gguf.MODEL_ARCH_NAMES[self.model_arch]
             self.gguf_writer.add_architecture()
@@ -8653,6 +8677,7 @@ class DeepseekV2Model(TextModel):
                 or "image_newline" in name
                 or "model.projector" in name
                 or "sam_model" in name
+                or "qwen2_model" in name
                 or "view_seperator" in name):
             return
         if name.startswith("siglip2.") or name.startswith("merger."):

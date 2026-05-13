@@ -88,13 +88,9 @@ static ggml_tensor * get_rel_pos(ggml_context * ctx0,
     return cur;  // [C, k_size, q_size]
 }
 
-ggml_cgraph * clip_graph_deepseekocr::build() {
-    // patch embedding
-    ggml_tensor * inp_raw = build_inp_raw();
 
-    ggml_tensor * sam_out;
+ggml_tensor * clip_graph_deepseekocr::build_sam(ggml_tensor * inp_raw) {
     // Building SAM
-    {
         const int n_embd  = hparams.sam_n_embd;
         const int n_layer = hparams.sam_n_layer;
         const int n_heads = hparams.sam_n_head;
@@ -196,7 +192,11 @@ ggml_cgraph * clip_graph_deepseekocr::build() {
                 rh   = ggml_reshape_4d(ctx0, rh, 1, H, W * H, n_heads * B);
                 mask = ggml_add(ctx0, rw, rh);      // [B*n_heads, H*W, H, W]
                 mask = ggml_reshape_4d(ctx0, mask, W * H, W * H, n_heads, B);
-                mask = ggml_cast(ctx0, mask, GGML_TYPE_F16);
+                // ggml_flash_attn_ext requires an F16 mask; ggml_soft_max_ext accepts F32,
+                // so only downcast when flash attention is actually used to avoid precision loss.
+                if (flash_attn_type == CLIP_FLASH_ATTN_TYPE_ENABLED) {
+                    mask = ggml_cast(ctx0, mask, GGML_TYPE_F16);
+                }
 
                 const float scale = 1.0f / sqrtf(static_cast<float>(d_heads));
 
@@ -244,8 +244,20 @@ ggml_cgraph * clip_graph_deepseekocr::build() {
         cb(cur, "sam_output", -1);
 
         ggml_build_forward_expand(gf, cur);
-        sam_out = cur;
-    }
+        return cur;
+
+}
+
+ggml_cgraph * clip_graph_deepseekocr::build() {
+    // patch embedding
+    ggml_tensor * inp_raw = build_inp_raw();
+
+    ggml_tensor * sam_out = build_sam(inp_raw);
+
+    ggml_tensor * sam_out_debug = ggml_cpy(ctx0, sam_out, ggml_dup_tensor(ctx0, sam_out));
+    cb(sam_out_debug, "sam_output_debug", -1);
+    ggml_build_forward_expand(gf, sam_out_debug);
+
 
     ggml_tensor * clip_out;
     // Building DS-OCR CLIP
@@ -290,6 +302,9 @@ ggml_cgraph * clip_graph_deepseekocr::build() {
         ggml_build_forward_expand(gf, cur);
         clip_out = cur;
     }
+    ggml_tensor * clip_out_debug = ggml_cpy(ctx0, clip_out, ggml_dup_tensor(ctx0, clip_out));
+    cb(clip_out_debug, "clip_output_debug", -1);
+    ggml_build_forward_expand(gf, clip_out_debug);
 
     const int clip_n_patches = sam_out->ne[0] * sam_out->ne[1];
 

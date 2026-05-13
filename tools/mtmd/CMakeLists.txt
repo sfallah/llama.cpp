@@ -32,6 +32,7 @@ add_library(mtmd
             models/siglip.cpp
             models/whisper-enc.cpp
             models/deepseekocr.cpp
+            models/deepseekocr2.cpp
             models/mobilenetv5.cpp
             models/youtuvl.cpp
             )

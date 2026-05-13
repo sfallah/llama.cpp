@@ -395,6 +395,7 @@ struct mtmd_context {
                     image_preproc = std::make_unique<mtmd_image_preprocessor_dyn_size>(ctx_v);
                 } break;
             case PROJECTOR_TYPE_DEEPSEEKOCR:
+            case PROJECTOR_TYPE_DEEPSEEKOCR2:
                 {
                     img_end = "\n"; // prevent empty batch on llama-server
                     image_preproc = std::make_unique<mtmd_image_preprocessor_deepseekocr>(ctx_v);
@@ -872,6 +873,7 @@ struct mtmd_tokenizer {
         return result;
     }
 
+
     // copied from common_tokenize
     static std::vector<llama_token> mtmd_tokenize_text_internal(
         const struct llama_vocab * vocab,
@@ -891,6 +893,8 @@ struct mtmd_tokenizer {
         }
         return result;
     }
+
+
 };
 
 int32_t mtmd_tokenize(mtmd_context * ctx,
