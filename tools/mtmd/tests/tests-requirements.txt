@@ -3,3 +3,6 @@ transformers
 tokenizers
 torch
 torchvision
+jiwer
+sacrebleu
+rapidfuzz
