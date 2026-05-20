@@ -336,7 +336,7 @@ static common_chat_msg simple_msg(const std::string & role, const std::string & 
 int main_automated_tests(void) {
     // jinja::enable_debug(true);
 
-    std::vector<llama_chat_message> conversation {
+    std::vector<llama_chat_message> common_conversation {
         {"system", "You are a helpful assistant"},
         {"user", "Hello"},
         {"assistant", "Hi there"},
@@ -354,6 +354,10 @@ int main_automated_tests(void) {
         std::string bos_token = "";
         std::string eos_token = "";
         bool supported_with_jinja = true;
+        std::vector<llama_chat_message> extra_conversation = {};
+        // when set override the default conversation for this test case
+        // useful for testing tool calls and other features not covered by the default conversation
+        std::vector<llama_chat_message> conversation = common_conversation;
     };
     std::vector<TestCase> test_cases {
         {
@@ -604,6 +608,60 @@ int main_automated_tests(void) {
             /* .expected_output_jinja= */ "<seed:bos>system\nYou are a helpful assistant<seed:eos><seed:bos>user\nHello<seed:eos><seed:bos>assistant\nHi there<seed:eos><seed:bos>user\nWho are you<seed:eos><seed:bos>assistant\nI am an assistant<seed:eos><seed:bos>user\nAnother question<seed:eos><seed:bos>assistant\n",
             /* .bos_token= */ "<seed:bos>",
             /* .eos_token= */ "<seed:eos>",
+        },
+        {
+            /* .name= */ "ibm-granite/granite-3.x (tool call)",
+            /* .template_str= */ "{%- for message in messages %}\n    {%- if message['role'] == 'assistant_tool_call' %}\n    {{- '<|start_of_role|>assistant<|end_of_role|><|tool_call|>' + message['content'] + '<|end_of_text|>\\n' }}\n    {%- else %}\n    {{- '<|start_of_role|>' + message['role'] + '<|end_of_role|>' + message['content'] + '<|end_of_text|>\\n' }}\n    {%- endif %}\n    {%- if loop.last and add_generation_prompt %}\n    {{- '<|start_of_role|>assistant<|end_of_role|>' }}\n    {%- endif %}\n{%- endfor %}",
+            /* .expected_output= */       "<|start_of_role|>system<|end_of_role|>You are a helpful assistant<|end_of_text|>\n<|start_of_role|>user<|end_of_role|>Hello<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>Hi there<|end_of_text|>\n<|start_of_role|>user<|end_of_role|>Who are you<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>   I am an assistant   <|end_of_text|>\n<|start_of_role|>user<|end_of_role|>Another question<|end_of_text|>\n<|start_of_role|>user<|end_of_role|>What is the weather?<|end_of_text|>\n<|start_of_role|>assistant_tool_call<|end_of_role|><|tool_call|>[{\"name\": \"get_weather\", \"arguments\": {\"location\": \"NYC\"}}]<|end_of_text|>\n<|start_of_role|>tool_response<|end_of_role|>{\"temperature\": 72}<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>",
+            /* .expected_output_jinja= */ "<|start_of_role|>system<|end_of_role|>You are a helpful assistant<|end_of_text|>\n<|start_of_role|>user<|end_of_role|>Hello<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>Hi there<|end_of_text|>\n<|start_of_role|>user<|end_of_role|>Who are you<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>   I am an assistant   <|end_of_text|>\n<|start_of_role|>user<|end_of_role|>Another question<|end_of_text|>\n<|start_of_role|>user<|end_of_role|>What is the weather?<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|><|tool_call|>[{\"name\": \"get_weather\", \"arguments\": {\"location\": \"NYC\"}}]<|end_of_text|>\n<|start_of_role|>tool_response<|end_of_role|>{\"temperature\": 72}<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>",
+            /* .bos_token= */ "",
+            /* .eos_token= */ "",
+            /* .supported_with_jinja= */ true,
+            /* .extra_conversation= */ {{"user", "What is the weather?"}, {"assistant_tool_call", "[{\"name\": \"get_weather\", \"arguments\": {\"location\": \"NYC\"}}]"}, {"tool_response", "{\"temperature\": 72}"}},
+        },
+        {
+            /* .name= */ "ibm-granite/granite-4.0 (tool call)",
+            /* .template_str= */ "{%- for message in messages %}\n    {%- if message['role'] == 'assistant_tool_call' %}\n    {{- '<|start_of_role|>assistant<|end_of_role|><|tool_call|>' + message['content'] + '<|end_of_text|>\\n' }}\n    {%- else %}\n    {{- '<|start_of_role|>' + message['role'] + '<|end_of_role|>' + message['content'] + '<|end_of_text|>\\n' }}\n    {%- endif %}\n    {%- if loop.last and add_generation_prompt %}\n    {{- '<|start_of_role|>assistant<|end_of_role|>' }}\n    {%- endif %}\n{%- endfor %}\n{# <tool_call> <tools> #}",
+            /* .expected_output= */       "<|start_of_role|>system<|end_of_role|>You are a helpful assistant<|end_of_text|>\n<|start_of_role|>user<|end_of_role|>Hello<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>Hi there<|end_of_text|>\n<|start_of_role|>user<|end_of_role|>Who are you<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>   I am an assistant   <|end_of_text|>\n<|start_of_role|>user<|end_of_role|>Another question<|end_of_text|>\n<|start_of_role|>user<|end_of_role|>What is the weather?<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|><|tool_call|><tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"location\": \"NYC\"}}\n</tool_call><|end_of_text|>\n<|start_of_role|>tool_response<|end_of_role|>{\"temperature\": 72}<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>",
+            /* .expected_output_jinja= */ "",
+            /* .bos_token= */ "",
+            /* .eos_token= */ "",
+            /* .supported_with_jinja= */ true,
+            /* .extra_conversation= */ {{"user", "What is the weather?"}, {"assistant_tool_call", "<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"location\": \"NYC\"}}\n</tool_call>"}, {"tool_response", "{\"temperature\": 72}"}},
+        },
+        // DeepSeek-OCR needs markers before the prompt and is newline-sensitive
+        {
+            /* .name= */ "deepseek-ai/DeepSeek-OCR (WebUI Two Images)",
+            /* .template_str= */ "deepseek-ocr",
+            /* .expected_output= */ "<__media_a__>\n<__media_b__>\nFree OCR.",
+            /* .expected_output_jinja= */ "",
+            /* .bos_token= */ "",
+            /* .eos_token= */ "",
+            /* .supported_with_jinja= */ false,
+            /* .extra_conversation= */ {},
+            /* .conversation= */ {{"user", "Free OCR.\n<__media_a__>\n<__media_b__>"}},
+        },
+        {
+            /* .name= */ "deepseek-ai/DeepSeek-OCR (mtmd-cli)",
+            /* .template_str= */ "deepseek-ocr",
+            /* .expected_output= */ "<__media__>\nFree OCR. ",
+            /* .expected_output_jinja= */ "",
+            /* .bos_token= */ "",
+            /* .eos_token= */ "",
+            /* .supported_with_jinja= */ false,
+            /* .extra_conversation= */ {},
+            /* .conversation= */ {{"user", "<__media__>Free OCR. "}},
+        },
+        {
+            /* .name= */ "deepseek-ai/DeepSeek-OCR (newlines around marker)",
+            /* .template_str= */ "deepseek-ocr",
+            /* .expected_output= */ "<__media_a__>\nFree OCR.",
+            /* .expected_output_jinja= */ "",
+            /* .bos_token= */ "",
+            /* .eos_token= */ "",
+            /* .supported_with_jinja= */ false,
+            /* .extra_conversation= */ {},
+            /* .conversation= */ {{"user", "\n<__media_a__>\n\nFree OCR."}},
         }
     };
     std::vector<char> formatted_chat(1024);
@@ -621,17 +679,19 @@ int main_automated_tests(void) {
     }
 
     // test invalid chat template
-    res = llama_chat_apply_template("INVALID TEMPLATE", conversation.data(), conversation.size(), true, formatted_chat.data(), formatted_chat.size());
+    res = llama_chat_apply_template("INVALID TEMPLATE", common_conversation.data(), common_conversation.size(), true, formatted_chat.data(), formatted_chat.size());
     assert(res < 0);
     const auto add_generation_prompt = true;
 
     for (const auto & test_case : test_cases) {
         std::cout << "\n\n=== " << test_case.name << " ===\n\n";
-        formatted_chat.resize(1024);
+        auto conv = test_case.conversation;
+        conv.insert(conv.end(), test_case.extra_conversation.begin(), test_case.extra_conversation.end());
+        formatted_chat.resize(2048);
         res = llama_chat_apply_template(
             test_case.template_str.c_str(),
-            conversation.data(),
-            conversation.size(),
+            conv.data(),
+            conv.size(),
             add_generation_prompt,
             formatted_chat.data(),
             formatted_chat.size()
@@ -647,22 +707,26 @@ int main_automated_tests(void) {
         }
     }
 
-    std::vector<common_chat_msg> messages;
-    messages.reserve(conversation.size());
-    for (const auto & msg : conversation) {
-        messages.push_back(simple_msg(msg.role, msg.content));
-    }
     for (const auto & test_case : test_cases) {
         if (!test_case.supported_with_jinja) {
             continue;
         }
         std::cout << "\n\n=== " << test_case.name << " (jinja) ===\n\n";
         try {
+            auto conv = test_case.conversation;
+            std::vector<common_chat_msg> msgs;
+            msgs.reserve(conv.size() + test_case.extra_conversation.size());
+            for (const auto & msg : conv) {
+                msgs.push_back(simple_msg(msg.role, msg.content));
+            }
+            for (const auto & msg : test_case.extra_conversation) {
+                msgs.push_back(simple_msg(msg.role, msg.content));
+            }
             auto output = format_using_common(
                                 test_case.template_str,
                                 test_case.bos_token,
                                 test_case.eos_token,
-                                messages);
+                                msgs);
             auto expected_output = normalize_newlines(test_case.expected_output_jinja.empty() ? test_case.expected_output : test_case.expected_output_jinja);
             if (output != expected_output) {
                 std::cout << "Template:```\n" << test_case.template_str << "\n```";

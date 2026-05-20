@@ -4,6 +4,7 @@
 #include "common.h"
 #include "jinja/caps.h"
 #include "peg-parser.h"
+#include "nlohmann/json.hpp"
 
 #include <chrono>
 #include <optional>
@@ -59,16 +60,21 @@ struct generation_params {
     common_reasoning_format               reasoning_format    = COMMON_REASONING_FORMAT_AUTO;
     bool                                  stream              = true;
     std::string                           grammar;
-    bool                                  add_generation_prompt = false;
-    bool                                  enable_thinking       = true;
-    std::chrono::system_clock::time_point now                   = std::chrono::system_clock::now();
-    std::string                           generation_prompt;
+    bool                                  add_generation_prompt  = false;
+    common_chat_continuation              continue_final_message = COMMON_CHAT_CONTINUATION_NONE;
+    common_chat_msg                       continue_msg;
+    bool                                  enable_thinking        = true;
+    std::chrono::system_clock::time_point now                    = std::chrono::system_clock::now();
     json                                  extra_context;
     bool                                  add_bos       = false;
     bool                                  add_eos       = false;
     bool                                  is_inference  = true;
     bool                                  add_inference = false;
     bool                                  mark_input    = true;  // whether to mark input strings in the jinja context
+
+    bool has_continuation() const {
+        return continue_final_message != COMMON_CHAT_CONTINUATION_NONE && !continue_msg.empty();
+    }
 };
 
 // ============================================================================
@@ -212,12 +218,14 @@ struct tool_id_analysis {
 // ============================================================================
 
 struct analyze_content;
+struct analyze_reasoning;
 
 struct parser_build_context {
     common_chat_peg_builder & p;
-    const generation_params &          inputs;
+    const generation_params &         inputs;
     common_peg_parser                 reasoning_parser;
     bool                              extracting_reasoning = false;
+    const analyze_reasoning *         reasoning            = nullptr;
     const analyze_content *           content              = nullptr;
 
     parser_build_context(common_chat_peg_builder & p, const generation_params & inputs);
@@ -305,18 +313,22 @@ struct analyze_tools : analyze_base {
 
   private:
     // Extract tool calling 'haystack' for further analysis and delegate further analysis based on format
-    void analyze_tool_calls(const analyze_reasoning & reasoning);
+    void analyze_tool_calls(const analyze_reasoning & reasoning, bool supports_parallel_tool_calls);
 
     // Analyze format based on position of function and argument name in needle
     void analyze_tool_call_format(const std::string &       haystack,
                                   const std::string &       fun_name_needle,
                                   const std::string &       arg_name_needle,
-                                  const analyze_reasoning & reasoning);
+                                  const analyze_reasoning & reasoning,
+                                  bool                      supports_parallel_tool_calls);
 
     // Analyze specifics of JSON native format (entire tool call is a JSON object)
     void analyze_tool_call_format_json_native(const std::string & clean_haystack,
                                               const std::string & fun_name_needle,
                                               const std::string & arg_name_needle);
+
+    // Check if parallel calls in JSON native format array wrapped or tag wrapped
+    void analyze_json_native_parallel_calls();
 
     // Analyze specifics of non-JSON native format (tags for function name or for function name and arguments)
     void analyze_tool_call_format_non_json(const std::string & clean_haystack,
@@ -350,6 +362,13 @@ struct analyze_tools : analyze_base {
     common_peg_parser build_tool_parser_json_native(parser_build_context & ctx) const;
     common_peg_parser build_tool_parser_tag_json(parser_build_context & ctx) const;
     common_peg_parser build_tool_parser_tag_tagged(parser_build_context & ctx) const;
+
+    // Shared helper: builds func_parser from open+call_id+args, handling atomic wrapping and close.
+    // atomic_peek: if present, used as the peek expression in the third atomicity branch.
+    common_peg_parser build_func_parser(common_chat_peg_builder & p, const std::string & name,
+                                        const common_peg_parser & call_id_section, bool have_call_id,
+                                        const common_peg_parser & args,
+                                        std::optional<common_peg_parser> atomic_peek) const;
 };
 
 // ============================================================================
@@ -372,7 +391,7 @@ struct autoparser {
     void analyze_template(const common_chat_template & tmpl);
 
     // Build the PEG parser for this template
-    common_peg_arena build_parser(const generation_params & inputs) const;
+    common_peg_arena build_parser(const generation_params & inputs, const std::string & generation_prompt) const;
 
   private:
     // Collect tokens from entire analysis to preserve

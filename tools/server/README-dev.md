@@ -224,7 +224,7 @@ The SvelteKit-based Web UI is introduced in this PR: https://github.com/ggml-org
 
 ### Architecture
 
-The WebUI follows a layered architecture:
+The UI follows a layered architecture:
 
 ```
 Routes → Components → Hooks → Stores → Services → Storage/API
@@ -234,7 +234,7 @@ Routes → Components → Hooks → Stores → Services → Storage/API
 -   **Services** - stateless API/database communication (`ChatService`, `ModelsService`, `PropsService`, `DatabaseService`)
 -   **Hooks** - reusable logic (`useModelChangeValidation`, `useProcessingState`)
 
-For detailed architecture diagrams, see [`tools/server/webui/docs/`](webui/docs/):
+For detailed architecture diagrams, see [`tools/ui/docs/`](../ui/docs/):
 
 -   `high-level-architecture.mmd` - full architecture with all modules
 -   `high-level-architecture-simplified.mmd` - simplified overview
@@ -246,7 +246,7 @@ For detailed architecture diagrams, see [`tools/server/webui/docs/`](webui/docs/
 
 ```sh
 # make sure you have Node.js installed
-cd tools/server/webui
+cd tools/ui
 npm i
 
 # run dev server (with hot reload)
@@ -259,6 +259,6 @@ npm run test
 npm run build
 ```
 
-After `public/index.html.gz` has been generated, rebuild `llama-server` as described in the [build](#build) section to include the updated UI.
+After `public/index.html` has been generated, rebuild `llama-server` as described in the [build](#build) section to include the updated UI.
 
 **Note:** The Vite dev server automatically proxies API requests to `http://localhost:8080`. Make sure `llama-server` is running on that port during development.
