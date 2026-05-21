@@ -3914,6 +3914,25 @@ bool clip_image_batch_encode(clip_ctx * ctx, const int n_threads, const clip_ima
 
                 set_input_i32("rel_pos_indices_local", rel_pos_indices_local);
                 set_input_i32("rel_pos_indices_global", rel_pos_indices_global);
+
+                if (ctx->model.proj_type == PROJECTOR_TYPE_DEEPSEEKOCR2) {
+                    // qwen2 encoder attention mask, see CustomQwen2Decoder._create_custom_4d_mask
+                    // sequence is [image tokens | query tokens], mask is [kv, q]:
+                    //   image rows: attend to all image tokens only (non-causal)
+                    //   query rows: attend to all image tokens + causally to query tokens
+                    ggml_tensor * m   = get_inp_tensor("qwen2_attn_mask");
+                    const int     seq = m->ne[0];
+                    const int     ni  = seq / 2;  // image tokens (equal to query tokens)
+                    std::vector<float> qwen2_mask(static_cast<size_t>(seq) * seq, 0.0f);
+                    for (int q = 0; q < seq; q++) {
+                        for (int kv = 0; kv < seq; kv++) {
+                            const bool allowed = q < ni ? (kv < ni)
+                                                        : (kv < ni || kv <= q);
+                            qwen2_mask[static_cast<size_t>(q) * seq + kv] = allowed ? 0.0f : -1e9f;
+                        }
+                    }
+                    set_input_f32("qwen2_attn_mask", qwen2_mask);
+                }
             } break;
         case PROJECTOR_TYPE_GEMMA3:
         case PROJECTOR_TYPE_GEMMA3NV:

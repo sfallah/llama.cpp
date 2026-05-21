@@ -124,65 +124,12 @@ ggml_cgraph * clip_graph_deepseekocr2::build() {
 
         auto seq_len = inp->ne[1];
 
-        //FIXME: need to be set as fixed input
-        ggml_tensor * mask;
-        mask = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, seq_len, seq_len);
-        mask = ggml_scale(ctx0, mask, -1e9f);
-
-        ggml_tensor * image_to_image = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, num_image_tokens, num_image_tokens);
-        ggml_tensor * query_to_image = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, num_image_tokens, num_queries);
-
-        // 1. Image tokens can attend to all image tokens (bidirectional)
-        // mask[0:num_image_tokens, 0:num_image_tokens] = 0
-
-        //mask[:num_image_tokens, num_image_tokens:]
-        ggml_tensor * mask_v1;
-        ggml_tensor * mask_v2;
-        mask_v1 = ggml_cont(ctx0, ggml_view_2d(ctx0, mask, mask->ne[0] - num_image_tokens, num_image_tokens,
-                                               mask->nb[1], mask->nb[0] * num_image_tokens));
-        //mask[num_image_tokens:, :]
-        mask_v2 = ggml_cont(ctx0, ggml_view_2d(ctx0, mask, mask->ne[0], mask->ne[1] - num_image_tokens, mask->nb[1],
-                                               mask->nb[1] * num_image_tokens));
-
-        mask = ggml_concat(ctx0, image_to_image, mask_v1, 0);
-        mask = ggml_concat(ctx0, mask, mask_v2, 1);
-
-        // 2. Query tokens can attend to all image tokens
-        // mask[num_image_tokens:, 0:num_image_tokens] = 0
-
-        ggml_tensor * mask_v3;
-        ggml_tensor * mask_v4;
-        //mask[num_image_tokens:, num_image_tokens:]
-        mask_v3 =
-            ggml_cont(ctx0, ggml_view_2d(ctx0, mask, mask->ne[0] - num_image_tokens, mask->ne[1] - num_image_tokens,
-                                         mask->nb[1], mask->nb[1] * num_image_tokens + mask->nb[0] * num_image_tokens));
-
-        //mask[:num_image_tokens, :]
-        mask_v4 = ggml_cont(ctx0, ggml_view_2d(ctx0, mask, mask->ne[0], num_image_tokens, mask->nb[1], 0));
-
-        mask = ggml_concat(ctx0, query_to_image, mask_v3, 0);
-        mask = ggml_concat(ctx0, mask_v4, mask, 1);
-
-        ggml_tensor * query_causal;
-        query_causal = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, num_queries, num_queries);
-        query_causal = ggml_fill(ctx0, query_causal, -1e9f);
-        query_causal = ggml_tri(ctx0, query_causal, GGML_TRI_TYPE_UPPER);
-
-        // Update query-query region in mask
-        ggml_tensor * mask_v5;
-        ggml_tensor * mask_v6;
-
-        //[mask[:num_image_tokens, num_image_tokens:]
-        mask_v5 = ggml_cont(ctx0, ggml_view_2d(ctx0, mask, mask->ne[0] - num_image_tokens, num_image_tokens,
-                                               mask->nb[1], mask->nb[0] * num_image_tokens));
-        //mask[:, :num_image_tokens]
-        mask_v6 = ggml_cont(ctx0, ggml_view_2d(ctx0, mask, num_image_tokens, mask->ne[1], mask_v1->nb[1], 0));
-
-        ggml_tensor * attn_mask;
-        attn_mask = ggml_concat(ctx0, mask_v5, query_causal, 1);
-        attn_mask = ggml_concat(ctx0, mask_v6, attn_mask, 0);
-
-        attn_mask = ggml_cast(ctx0, attn_mask, GGML_TYPE_F16);
+        // attention mask for the qwen2 encoder, see CustomQwen2Decoder._create_custom_4d_mask
+        // sequence layout is [image tokens | query tokens]; the values are computed on
+        // the host and uploaded in clip.cpp set_input() (see "qwen2_attn_mask")
+        ggml_tensor * attn_mask = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, seq_len, seq_len);
+        ggml_set_name(attn_mask, "qwen2_attn_mask");
+        ggml_set_input(attn_mask);
 
         ggml_tensor * cur;
         ggml_tensor * inpL = inp;

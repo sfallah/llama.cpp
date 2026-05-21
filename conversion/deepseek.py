@@ -92,12 +92,14 @@ class DeepseekOCR2VisionModel(DeepseekOCRVisionModel):
         self.clip_projector_type = gguf.VisionProjectorType.DEEPSEEKOCR2
 
     def set_gguf_parameters(self):
+        # the vision tower's qwen2 encoder is built from fixed defaults,
+        # see build_qwen2_decoder_as_encoder() in deepencoderv2.py
         if self.hparams.get("patch_size") is None:
             self.hparams["patch_size"] = 16
         if self.hparams.get("intermediate_size") is None:
-            self.hparams["intermediate_size"] = 11008
+            self.hparams["intermediate_size"] = 4864
         if self.hparams.get("num_attention_heads") is None:
-            self.hparams["num_attention_heads"] = self.global_config["num_attention_heads"]
+            self.hparams["num_attention_heads"] = 14
         super().set_gguf_parameters()
 
     def get_vision_config(self) -> dict[str, Any]:
