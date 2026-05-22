@@ -3023,6 +3023,13 @@ ggml_tensor * clip_get_newline_tensor(const struct clip_ctx * ctx) {
     return ctx->model.image_newline;
 }
 
+void clip_get_newline_embd(const struct clip_ctx * ctx, float * out) {
+    ggml_tensor * nl = ctx->model.image_newline;
+    GGML_ASSERT(nl != nullptr);
+    GGML_ASSERT(ggml_nbytes(nl) == static_cast<size_t>(clip_n_mmproj_embd(ctx)) * sizeof(float));
+    ggml_backend_tensor_get(nl, out, 0, ggml_nbytes(nl));
+}
+
 void clip_free(clip_ctx * ctx) {
     if (ctx == nullptr) {
         return;
@@ -3282,10 +3289,14 @@ int clip_n_output_tokens(const struct clip_ctx * ctx, struct clip_image_f32 * im
             // E.g., 64x64 -> 16x16 patches
             n_patches /= 16;
 
-            // build_global_local_features adds image newlines and view separator
-            // Formula: h*(w+1) + 1 where h = w = sqrt(n_patches)
-            int h = static_cast<int>(std::sqrt(static_cast<float>(n_patches)));
-            n_patches = h * (h + 1) + 1;
+            // 1024 global view -> 256 query tokens; the graph weaves one image
+            // newline per row and a trailing view separator -> h*(w+1) + 1.
+            // 640 local tiles -> 100 query tokens, emitted raw; the newlines for
+            // the tile grid are woven across all tiles in mtmd_encode.
+            if (n_patches == 256) {
+                int h = static_cast<int>(std::sqrt(static_cast<float>(n_patches)));
+                n_patches = h * (h + 1) + 1;
+            }
         } break;
         case PROJECTOR_TYPE_HUNYUANVL:
             {

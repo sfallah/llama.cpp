@@ -8,9 +8,10 @@ variant, calculates CER and chrF, and holds them against the HF model's
 scores. The cases cover:
 
   - DeepSeek-OCR   on a single-view scan (test-1.jpeg, 640x488)
+  - DeepSeek-OCR   on a tall crop (test-1-positive.png, 429x806) large
+    enough to exercise the multi-tile dynamic-resolution path
   - DeepSeek-OCR-2 on the same single-view scan
-  - DeepSeek-OCR-2 on a tall crop (test-1-positive.png, 429x806) that is
-    large enough to exercise the multi-tile dynamic-resolution path
+  - DeepSeek-OCR-2 on the same tall crop
 
 Exits non-zero if any case fails its parity gate.
 """
@@ -88,6 +89,21 @@ CASES = [
         # deepseek-ai/DeepSeek-OCR (greedy) on test-1.jpeg vs test-1-ground-truth.txt.
         # llama.cpp scores better than this (CER ~0.24), so the gate has margin.
         hf_cer=0.3030, hf_chrf=67.52, cer_tol=0.02, chrf_tol=2.0,
+    ),
+    TestCase(
+        model_key="v1", label="multi-tile (dynamic resolution)",
+        image="tools/mtmd/tests/test-1-positive.png",
+        ground_truth="tools/mtmd/tests/test-1-ground-truth.txt",
+        # deepseek-ai/DeepSeek-OCR (v1, Gundam crop mode) on test-1-positive.png,
+        # a 429x806 crop of the same article. At 806 px tall it crosses the 640
+        # tile threshold, so HF and llama.cpp both take the multi-tile path:
+        # dynamic_preprocess picks a (1,2) grid -> 2 local 640 tiles + 1 global
+        # 1024 view = 493 image tokens. This is the regression guard for the v1
+        # tiling preprocessing and the cross-tile newline weave -- v1 weaves one
+        # image-newline token per row of the assembled tile grid, so a broken
+        # weave craters the score. The crop is high quality: the HF reference
+        # and llama.cpp both score a perfect CER 0.0000 / chrF 100.00.
+        hf_cer=0.0000, hf_chrf=100.00, cer_tol=0.03, chrf_tol=3.0,
     ),
     TestCase(
         model_key="v2", label="single-view scan",

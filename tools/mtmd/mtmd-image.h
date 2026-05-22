@@ -139,9 +139,24 @@ struct mtmd_image_preprocessor_internvl : mtmd_image_preprocessor_llava_uhd {
     bool preprocess(const clip_image_u8 & img, clip_image_f32_batch & output) override;
 };
 
+// DeepSeek-OCR (v1) "Gundam" crop mode: a 1024x1024 global view, plus
+// 640x640 local tiles when the image is larger than a tile in either
+// dimension. ref: dynamic_preprocess() in modeling_deepseekocr.py
 struct mtmd_image_preprocessor_deepseekocr : mtmd_image_preprocessor {
+    static constexpr int base_size = 1024; // global view
+    static constexpr int tile_size = 640;  // local tile
+    static constexpr int min_tiles = 2;
+    static constexpr int max_tiles = 9;
+
     mtmd_image_preprocessor_deepseekocr(const clip_ctx * ctx) : mtmd_image_preprocessor(ctx) {}
     bool preprocess(const clip_image_u8 & img, clip_image_f32_batch & output) override;
+
+private:
+    std::vector<clip_image_size> get_target_ratios();
+    clip_image_size find_closest_aspect_ratio(
+            float aspect_ratio,
+            const std::vector<clip_image_size> & target_ratios,
+            int width, int height);
 };
 
 // DeepSeek-OCR-2: a 1024x1024 global view, plus InternVL-style 768x768 local

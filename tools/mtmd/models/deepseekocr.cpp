@@ -308,18 +308,21 @@ ggml_cgraph * clip_graph_deepseekocr::build() {
     cur = ggml_mul_mat(ctx0, model.mm_fc_w, cur);
     cur = ggml_add(ctx0, cur, model.mm_fc_b);
 
-    const auto h     = static_cast<int>(std::sqrt(static_cast<float>(cur->ne[1])));
-    const auto w     = h;
-    const auto n_dim = cur->ne[0];
+    // The 1024 global view weaves one image-newline token per row and a
+    // trailing view separator in-graph -> h*(w+1) + 1 tokens. 640 local tiles
+    // are emitted raw: their newlines span the full tile grid (across tiles),
+    // so they are woven in mtmd_encode once every tile has been encoded.
+    if (clip_n_patches == 256) {
+        const auto h     = static_cast<int>(std::sqrt(static_cast<float>(cur->ne[1])));
+        const auto w     = h;
+        const auto n_dim = cur->ne[0];
 
-    ggml_tensor * imgnl;
-    ggml_tensor * vs;
-
-    imgnl = ggml_repeat_4d(ctx0, model.image_newline, n_dim, 1, h, 1);
-    vs    = ggml_reshape_2d(ctx0, model.view_seperator, n_dim, 1);  // (n_dim, 1)
-    cur   = ggml_reshape_3d(ctx0, cur, n_dim, w, h);
-    cur   = ggml_reshape_2d(ctx0, ggml_concat(ctx0, cur, imgnl, 1), n_dim, (w + 1) * h);
-    cur   = ggml_concat(ctx0, cur, vs, 1);  // (n_dim, h*(w+1) + 1)
+        ggml_tensor * imgnl = ggml_repeat_4d(ctx0, model.image_newline, n_dim, 1, h, 1);
+        ggml_tensor * vs    = ggml_reshape_2d(ctx0, model.view_seperator, n_dim, 1);  // (n_dim, 1)
+        cur = ggml_reshape_3d(ctx0, cur, n_dim, w, h);
+        cur = ggml_reshape_2d(ctx0, ggml_concat(ctx0, cur, imgnl, 1), n_dim, (w + 1) * h);
+        cur = ggml_concat(ctx0, cur, vs, 1);  // (n_dim, h*(w+1) + 1)
+    }
 
     cb(cur, "dsocr_output", -1);
 

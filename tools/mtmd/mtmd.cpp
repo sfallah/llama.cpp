@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -862,6 +863,15 @@ struct mtmd_tokenizer {
                 for (const auto & entry : batch_f32.entries) {
                     n_tokens += clip_n_output_tokens(ctx->ctx_v, entry.get());
                 }
+                // DeepSeek-OCR (v1) weaves one image-newline token per row of the
+                // local tile grid in mtmd_encode; clip_n_output_tokens counts the
+                // raw tile patches only, so add the grid-row newlines here.
+                if (ctx->proj_type_v() == PROJECTOR_TYPE_DEEPSEEKOCR
+                        && (batch_f32.grid_x > 1 || batch_f32.grid_y > 1)) {
+                    const int tile_h = static_cast<int>(std::sqrt(
+                        static_cast<float>(clip_n_output_tokens(ctx->ctx_v, batch_f32.entries[0].get()))));
+                    n_tokens += static_cast<size_t>(batch_f32.grid_y) * tile_h;
+                }
 
                 mtmd_image_tokens_ptr image_tokens(new mtmd_image_tokens);
                 if (mtmd_decode_use_mrope(ctx)) {
@@ -1096,7 +1106,59 @@ int32_t mtmd_encode(mtmd_context * ctx, const mtmd_image_tokens * image_tokens) 
     ctx->image_embd_v.resize(image_tokens->n_tokens() * n_mmproj_embd);
     bool ok = false;
 
-    if (clip_is_llava(ctx_clip)
+    if (proj_type == PROJECTOR_TYPE_DEEPSEEKOCR) {
+        // DeepSeek-OCR (v1): encode each 640 local tile to raw tile_h*tile_h
+        // features, then weave them into the assembled tile grid with one
+        // image-newline token per grid row -- this reproduces the layout of
+        // build_global_local_features() in modeling_deepseekocr.py, whose
+        // newlines span the full tile grid rather than a single tile. The 1024
+        // global view is the last entry and is encoded straight into place: the
+        // graph already wove its newlines and the trailing view separator.
+        const auto & entries = image_tokens->batch_f32.entries;
+        const int wcrop   = image_tokens->batch_f32.grid_x;
+        const int hcrop   = image_tokens->batch_f32.grid_y;
+        const int n_tiles = (wcrop > 1 || hcrop > 1) ? wcrop * hcrop : 0;
+
+        float * out = ctx->image_embd_v.data();
+        ok = true;
+
+        if (n_tiles > 0) {
+            const int    tile_tokens = clip_n_output_tokens(ctx_clip, entries[0].get());
+            const int    tile_h      = static_cast<int>(std::sqrt((float) tile_tokens));
+            const size_t row_sz      = static_cast<size_t>(tile_h) * n_mmproj_embd;  // one patch-row
+            const size_t tile_sz     = static_cast<size_t>(tile_tokens) * n_mmproj_embd;
+
+            // raw per-tile features
+            std::vector<float> raw((size_t) n_tiles * tile_sz);
+            for (int i = 0; i < n_tiles && ok; i++) {
+                ok = clip_image_encode(ctx_clip, ctx->n_threads, entries[i].get(),
+                                       raw.data() + (size_t) i * tile_sz);
+            }
+
+            // image-newline embedding (a model parameter shared with the graph)
+            std::vector<float> newline(n_mmproj_embd);
+            clip_get_newline_embd(ctx_clip, newline.data());
+
+            // weave: for each tile-grid row, interleave the matching patch-row of
+            // every tile in that row, then append one image-newline token.
+            for (int r = 0; r < hcrop && ok; r++) {
+                for (int pr = 0; pr < tile_h; pr++) {
+                    for (int c = 0; c < wcrop; c++) {
+                        const float * tile = raw.data() + static_cast<size_t>(r * wcrop + c) * tile_sz;
+                        memcpy(out, tile + static_cast<size_t>(pr) * row_sz, row_sz * sizeof(float));
+                        out += row_sz;
+                    }
+                    memcpy(out, newline.data(), static_cast<size_t>(n_mmproj_embd) * sizeof(float));
+                    out += n_mmproj_embd;
+                }
+            }
+        }
+
+        // global view (last entry): woven in-graph, encoded straight into place
+        if (ok) {
+            ok = clip_image_encode(ctx_clip, ctx->n_threads, entries.back().get(), out);
+        }
+    } else if (clip_is_llava(ctx_clip)
         || proj_type == PROJECTOR_TYPE_MINICPMV
         || proj_type == PROJECTOR_TYPE_GLM_EDGE
         || proj_type == PROJECTOR_TYPE_INTERNVL
