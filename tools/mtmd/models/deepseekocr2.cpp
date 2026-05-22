@@ -220,9 +220,14 @@ ggml_cgraph * clip_graph_deepseekocr2::build() {
 
     const auto n_dim = cur->ne[0];
 
-    ggml_tensor * vs;
-    vs  = ggml_reshape_2d(ctx0, model.view_seperator, n_dim, 1);  // (n_dim, 1)
-    cur = ggml_concat(ctx0, cur, vs, 1);                          // (n_dim, h*(w+1) + 1)
+    // append the learned view separator only after the 1024 global view (256
+    // query tokens); 768 local tiles (144 tokens) get no separator, so the
+    // decoder sees one separator per image, see
+    // torch.cat([local, global, view_seperator]) in modeling_deepseekocr2.py
+    if (cur->ne[1] == 256) {
+        ggml_tensor * vs = ggml_reshape_2d(ctx0, model.view_seperator, n_dim, 1);  // (n_dim, 1)
+        cur = ggml_concat(ctx0, cur, vs, 1);                                       // (n_dim, 257)
+    }
 
     cb(cur, "dsocr2_output", -1);
 

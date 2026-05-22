@@ -3,9 +3,16 @@
 Evaluates llama.cpp's DeepSeek-OCR by comparing its output for a test
 image to the actual text in part of that image.
 
-Runs the test image through mtmd-cli for both DeepSeek-OCR and
-DeepSeek-OCR-2, calculates CER and chrF for each output, and holds them
-against the HF model's scores. Exits non-zero if either variant fails.
+Each test case runs one image through mtmd-cli for one DeepSeek-OCR
+variant, calculates CER and chrF, and holds them against the HF model's
+scores. The cases cover:
+
+  - DeepSeek-OCR   on a single-view scan (test-1.jpeg, 640x488)
+  - DeepSeek-OCR-2 on the same single-view scan
+  - DeepSeek-OCR-2 on a tall crop (test-1-positive.png, 429x806) that is
+    large enough to exercise the multi-tile dynamic-resolution path
+
+Exits non-zero if any case fails its parity gate.
 """
 
 import argparse
@@ -18,27 +25,34 @@ from pathlib import Path
 
 logger = logging.getLogger("deepseek-ocr-test")
 
-DEFAULT_IMAGE = "test-1.jpeg"
-DEFAULT_EXPECTED_TEXT = "test-1-ground-truth.txt"
 RUN_TIMEOUT = 300
 
 
 @dataclass
 class ModelSpec:
-    """A DeepSeek-OCR variant: CLI flags, default paths, and its parity baseline.
-
-    The gate is parity with the upstream HuggingFace model on test-1.jpeg: CER
-    must stay within `cer_tol` above the HF model's CER, and chrF within
-    `chrf_tol` below it.
-    """
+    """A DeepSeek-OCR variant: CLI flags and default GGUF paths."""
     key: str             # short id, e.g. "v1"
     label: str           # human-readable name
     model_arg: str       # CLI flag overriding the model GGUF path
     mmproj_arg: str      # CLI flag overriding the mmproj GGUF path
     model_default: str   # default model GGUF path, relative to the repo root
     mmproj_default: str  # default mmproj GGUF path, relative to the repo root
-    hf_cer: float        # upstream HF model's CER on the test image
-    hf_chrf: float       # upstream HF model's chrF on the test image
+
+
+@dataclass
+class TestCase:
+    """One image run for one model, with a parity gate vs the HF reference.
+
+    The gate is parity with the upstream HuggingFace model: CER must stay
+    within `cer_tol` above the HF model's CER, and chrF within `chrf_tol`
+    below it.
+    """
+    model_key: str       # ModelSpec.key this case runs against
+    label: str           # human-readable case name
+    image: str           # image path, relative to the repo root
+    ground_truth: str    # ground-truth transcript path, relative to the repo root
+    hf_cer: float        # upstream HF model's CER on this image
+    hf_chrf: float       # upstream HF model's chrF on this image
     cer_tol: float       # allowed CER slack above the HF reference
     chrf_tol: float      # allowed chrF slack below the HF reference
 
@@ -51,29 +65,58 @@ class ModelSpec:
         return self.hf_chrf - self.chrf_tol
 
 
-MODELS = [
-    ModelSpec(
+MODELS = {
+    "v1": ModelSpec(
         key="v1", label="DeepSeek-OCR",
         model_arg="--llama-model", mmproj_arg="--mmproj",
         model_default="gguf_models/deepseek-ai/deepseek-ocr-bf16.gguf",
         mmproj_default="gguf_models/deepseek-ai/mmproj-deepseek-ocr-bf16.gguf",
-        # deepseek-ai/DeepSeek-OCR (greedy) on test-1.jpeg vs test-1-ground-truth.txt.
-        # llama.cpp scores better than this (CER ~0.24), so the gate has margin.
-        hf_cer=0.3030, hf_chrf=67.52, cer_tol=0.02, chrf_tol=2.0,
     ),
-    ModelSpec(
+    "v2": ModelSpec(
         key="v2", label="DeepSeek-OCR-2",
         model_arg="--llama-model-2", mmproj_arg="--mmproj-2",
         model_default="gguf_models/deepseek-ai/deepseek-ocr-2-bf16.gguf",
         mmproj_default="gguf_models/deepseek-ai/mmproj-deepseek-ocr-2-bf16.gguf",
-        # deepseek-ai/DeepSeek-OCR-2 on test-1.jpeg. Both the HF model and llama.cpp
-        # fail this low-quality full-page scan: they read the headlines but cannot
-        # resolve the small body text and hallucinate it. The HF reference decodes
-        # with no_repeat_ngram_size; run_mtmd_cli matches that with the DRY sampler,
-        # so the two are compared on equal footing. chrF is the load-bearing gate
-        # here -- it sits at ~34 when the hallucinated body does not loop and
-        # craters to ~24 if it does. llama.cpp currently scores CER ~0.77 / chrF ~34.
+    ),
+}
+
+CASES = [
+    TestCase(
+        model_key="v1", label="single-view scan",
+        image="tools/mtmd/test-1.jpeg",
+        ground_truth="tools/mtmd/tests/test-1-ground-truth.txt",
+        # deepseek-ai/DeepSeek-OCR (greedy) on test-1.jpeg vs test-1-ground-truth.txt.
+        # llama.cpp scores better than this (CER ~0.24), so the gate has margin.
+        hf_cer=0.3030, hf_chrf=67.52, cer_tol=0.02, chrf_tol=2.0,
+    ),
+    TestCase(
+        model_key="v2", label="single-view scan",
+        image="tools/mtmd/test-1.jpeg",
+        ground_truth="tools/mtmd/tests/test-1-ground-truth.txt",
+        # deepseek-ai/DeepSeek-OCR-2 on test-1.jpeg. The image is 640x488 -- below
+        # the 768 tiling threshold -- so both the HF model and llama.cpp take the
+        # single 1024 global-view path. Both fail this low-quality full-page scan:
+        # they read the headlines but cannot resolve the small body text and
+        # hallucinate it. The HF reference decodes with no_repeat_ngram_size;
+        # run_mtmd_cli matches that with the DRY sampler, so the two are compared
+        # on equal footing. chrF is the load-bearing gate here -- it sits at ~34
+        # when the hallucinated body does not loop and craters to ~24 if it does.
+        # llama.cpp currently scores CER ~0.77 / chrF ~34.
         hf_cer=0.6894, hf_chrf=34.60, cer_tol=0.12, chrf_tol=8.0,
+    ),
+    TestCase(
+        model_key="v2", label="multi-tile (dynamic resolution)",
+        image="tools/mtmd/tests/test-1-positive.png",
+        ground_truth="tools/mtmd/tests/test-1-ground-truth.txt",
+        # deepseek-ai/DeepSeek-OCR-2 on test-1-positive.png, a 429x806 crop of the
+        # same article. At 806 px tall it crosses the 768 threshold, so HF and
+        # llama.cpp both take the multi-tile path: dynamic_preprocess picks a (1,2)
+        # grid -> 2 local 768 tiles + 1 global 1024 view = 545 image tokens. This
+        # is the regression guard for the tiling preprocessing -- a broken tile
+        # path craters the score (cf. the 0.77 CER on the un-tiled low-res scan).
+        # The crop is high quality, so both models score near-perfect: HF
+        # CER 0.0236 / chrF 97.05, llama.cpp CER ~0.017 / chrF ~96.8.
+        hf_cer=0.0236, hf_chrf=97.05, cer_tol=0.03, chrf_tol=3.0,
     ),
 ]
 
@@ -176,7 +219,7 @@ def read_expected_text(file_path: Path) -> str:
         return f.read().strip()
 
 
-def evaluate(spec: "ModelSpec", expected: str, ocr_out: str) -> bool:
+def evaluate(case: "TestCase", title: str, expected: str, ocr_out: str) -> bool:
     expected = normalize_text(expected)
     ocr_out = normalize_text(ocr_out)
     aligned = locally_align(expected, ocr_out)
@@ -188,16 +231,16 @@ def evaluate(spec: "ModelSpec", expected: str, ocr_out: str) -> bool:
     cer = compute_cer(expected, aligned)
     chrf = compute_chrf(expected, aligned)
 
-    cer_pass = cer <= spec.cer_max
-    chrf_pass = chrf >= spec.chrf_min
+    cer_pass = cer <= case.cer_max
+    chrf_pass = chrf >= case.chrf_min
     passed = cer_pass and chrf_pass
 
     logger.info("")
     logger.info("=" * 60)
-    logger.info(f"{spec.label}: Free OCR evaluation")
+    logger.info(f"{title}: Free OCR evaluation")
     logger.info("=" * 60)
-    logger.info(f"  CER               {cer:>7.4f}    (HF {spec.hf_cer:.4f}, <= {spec.cer_max:>7.4f}  -> {verdict(cer_pass)})")
-    logger.info(f"  chrF (0-100)      {chrf:>7.2f}    (HF {spec.hf_chrf:.2f}, >= {spec.chrf_min:>7.2f}  -> {verdict(chrf_pass)})")
+    logger.info(f"  CER               {cer:>7.4f}    (HF {case.hf_cer:.4f}, <= {case.cer_max:>7.4f}  -> {verdict(cer_pass)})")
+    logger.info(f"  chrF (0-100)      {chrf:>7.2f}    (HF {case.hf_chrf:.2f}, >= {case.chrf_min:>7.2f}  -> {verdict(chrf_pass)})")
     logger.info(f"  Expected chars    {len(expected):>7}")
     logger.info(f"  Aligned chars     {len(aligned):>7} (of {len(ocr_out)} OCR chars)")
     logger.info("")
@@ -210,7 +253,7 @@ def argument_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="Compare llama.cpp DeepSeek-OCR output with a ground-truth transcript")
     ap.add_argument("--llama-bin", default="build/bin/llama-mtmd-cli",
                     help="Path to llama-mtmd-cli binary (relative to repo root or absolute)")
-    for spec in MODELS:
+    for spec in MODELS.values():
         ap.add_argument(spec.model_arg, default=spec.model_default,
                         help=f"Path to the {spec.label} GGUF model (relative to repo root or absolute)")
         ap.add_argument(spec.mmproj_arg, default=spec.mmproj_default,
@@ -234,63 +277,60 @@ def main() -> int:
     args = argument_parser().parse_args()
     configure_logging(args.verbose)
 
-    tests_dir = Path(__file__).parent  # tools/mtmd/tests
-    mtmd_dir = tests_dir.parent  # tools/mtmd
-    repo_root = mtmd_dir.parent.parent  # repo root
-
-    image = resolve_path(DEFAULT_IMAGE, mtmd_dir)
-    expected_text_path = resolve_path(DEFAULT_EXPECTED_TEXT, tests_dir)
+    repo_root = Path(__file__).resolve().parents[3]  # tests -> mtmd -> tools -> repo root
     binary = resolve_path(args.llama_bin, repo_root)
 
-    # shared inputs must exist before any model can run
-    for label, path in [("image", image),
-                        ("expected-text", expected_text_path),
-                        ("binary", binary)]:
-        if not path.exists():
-            logger.error(f"Error: {label} not found: {path}")
-            return 1
+    if not binary.exists():
+        logger.error(f"Error: binary not found: {binary}")
+        return 1
 
     logger.info("=" * 60)
     logger.info("DeepSeek-OCR: llama.cpp vs HF parity check")
     logger.info("=" * 60)
 
-    expected = read_expected_text(expected_text_path)
-    logger.info(f"Expected text: {len(expected)} chars")
-
     results: dict[str, bool] = {}
-    for spec in MODELS:
-        model = resolve_path(getattr(args, arg_dest(spec.model_arg)), repo_root)
-        mmproj = resolve_path(getattr(args, arg_dest(spec.mmproj_arg)), repo_root)
+    for case in CASES:
+        model_spec = MODELS[case.model_key]
+        title = f"{model_spec.label} -- {case.label}"
 
         logger.info("")
         logger.info("#" * 60)
-        logger.info(f"# {spec.label}")
+        logger.info(f"# {title}")
         logger.info("#" * 60)
 
-        missing = [(lbl, p) for lbl, p in [("model", model), ("mmproj", mmproj)]
+        model = resolve_path(getattr(args, arg_dest(model_spec.model_arg)), repo_root)
+        mmproj = resolve_path(getattr(args, arg_dest(model_spec.mmproj_arg)), repo_root)
+        image = resolve_path(case.image, repo_root)
+        ground_truth = resolve_path(case.ground_truth, repo_root)
+
+        missing = [(lbl, p) for lbl, p in [("model", model), ("mmproj", mmproj),
+                                           ("image", image), ("ground-truth", ground_truth)]
                    if not p.exists()]
         if missing:
             for lbl, p in missing:
-                logger.error(f"  Error: {spec.label} {lbl} not found: {p}")
-            results[spec.label] = False
+                logger.error(f"  Error: {lbl} not found: {p}")
+            results[title] = False
             continue
 
+        expected = read_expected_text(ground_truth)
+        logger.info(f"  Image: {case.image}")
+        logger.info(f"  Expected text: {len(expected)} chars")
         logger.info("  Running llama.cpp 'Free OCR'")
         try:
             ocr_out = run_mtmd_cli(model, mmproj, image, binary)
         except RuntimeError as e:
             logger.error(f"  Error: {e}")
-            results[spec.label] = False
+            results[title] = False
             continue
 
-        results[spec.label] = evaluate(spec, expected, ocr_out)
+        results[title] = evaluate(case, title, expected, ocr_out)
 
     logger.info("")
     logger.info("=" * 60)
     logger.info("Summary")
     logger.info("=" * 60)
-    for label, ok in results.items():
-        logger.info(f"  {label:<16} {verdict(ok)}")
+    for title, ok in results.items():
+        logger.info(f"  {title:<48} {verdict(ok)}")
     all_passed = all(results.values())
     logger.info("")
     logger.info(f"  Overall: {verdict(all_passed)}")

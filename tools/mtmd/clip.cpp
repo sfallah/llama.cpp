@@ -3296,12 +3296,13 @@ int clip_n_output_tokens(const struct clip_ctx * ctx, struct clip_image_f32 * im
             } break;
         case PROJECTOR_TYPE_DEEPSEEKOCR2:
         {
+            // 1024 global view -> 256 query tokens + 1 view separator = 257;
+            // 768 local tile   -> 144 query tokens, no separator.
             n_patches /= 16;
-            n_patches += 1;
-            if (n_patches > 257) {
-                n_patches = 257;
+            if (n_patches == 256) {
+                n_patches += 1; // view separator, appended only after the global view
             }
-        }break;
+        } break;
         case PROJECTOR_TYPE_LFM2A:
             {
                 n_patches = ((((img->nx + 1) / 2) + 1) / 2 + 1) / 2;
