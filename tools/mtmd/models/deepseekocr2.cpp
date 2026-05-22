@@ -125,11 +125,25 @@ ggml_cgraph * clip_graph_deepseekocr2::build() {
         auto seq_len = inp->ne[1];
 
         // attention mask for the qwen2 encoder, see CustomQwen2Decoder._create_custom_4d_mask
-        // sequence layout is [image tokens | query tokens]; the values are computed on
-        // the host and uploaded in clip.cpp set_input() (see "qwen2_attn_mask")
-        ggml_tensor * attn_mask = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, seq_len, seq_len);
-        ggml_set_name(attn_mask, "qwen2_attn_mask");
-        ggml_set_input(attn_mask);
+        // sequence layout is [image tokens | query tokens]; the mask is [kv, q]:
+        //   image rows: attend to all image tokens, no query tokens (non-causal)
+        //   query rows: attend to all image tokens, causally to query tokens
+        const int64_t ni = num_image_tokens;
+        const int64_t nq = num_queries;
+
+        // image rows: [ 0 (kv=image) | -inf (kv=query) ]
+        ggml_tensor * zero_ii    = ggml_fill(ctx0, ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, ni, ni), 0.0f);
+        ggml_tensor * neg_qi     = ggml_fill(ctx0, ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, nq, ni), -1e9f);
+        ggml_tensor * image_rows = ggml_concat(ctx0, zero_ii, neg_qi, 0);   // [ni+nq, ni]
+
+        // query rows: [ 0 (kv=image) | causal (kv=query) ]
+        ggml_tensor * zero_iq    = ggml_fill(ctx0, ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, ni, nq), 0.0f);
+        ggml_tensor * causal     = ggml_fill(ctx0, ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, nq, nq), -1e9f);
+        causal                   = ggml_tri(ctx0, causal, GGML_TRI_TYPE_UPPER);
+        ggml_tensor * query_rows = ggml_concat(ctx0, zero_iq, causal, 0);   // [ni+nq, nq]
+
+        ggml_tensor * attn_mask = ggml_concat(ctx0, image_rows, query_rows, 1);   // [ni+nq, ni+nq]
+        attn_mask = ggml_cast(ctx0, attn_mask, GGML_TYPE_F16);
 
         ggml_tensor * cur;
         ggml_tensor * inpL = inp;
