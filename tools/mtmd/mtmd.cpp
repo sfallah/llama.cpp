@@ -18,7 +18,6 @@
 
 #include <algorithm>
 #include <cerrno>
-#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -1027,7 +1026,6 @@ struct mtmd_tokenizer {
         return result;
     }
 
-
     // copied from common_tokenize
     static std::vector<llama_token> mtmd_tokenize_text_internal(
         const struct llama_vocab * vocab,
@@ -1053,8 +1051,6 @@ struct mtmd_tokenizer {
         }
         return result;
     }
-
-
 };
 
 int32_t mtmd_tokenize(mtmd_context * ctx,
@@ -1165,8 +1161,8 @@ int32_t mtmd_encode(mtmd_context * ctx, const mtmd_image_tokens * image_tokens) 
         || proj_type == PROJECTOR_TYPE_DEEPSEEKOCR2) {
         // TODO @ngxson : llava does not support batched encoding ; this should be fixed inside clip_image_batch_encode()
         const auto & entries = image_tokens->batch_f32.entries;
-        // entries may have different token counts (DeepSeek-OCR-2: 144 per tile,
-        // 257 for the global view), so accumulate the write offset.
+        // entries may have different token counts
+        // e.g., DeepSeek-OCR-2: 144 per tile views, 257 for the global view
         size_t offset = 0;
         for (size_t i = 0; i < entries.size(); i++) {
             int n_tokens_per_image = clip_n_output_tokens(ctx_clip, entries[i].get());
@@ -1175,7 +1171,7 @@ int32_t mtmd_encode(mtmd_context * ctx, const mtmd_image_tokens * image_tokens) 
                 ctx->n_threads,
                 entries[i].get(),
                 ctx->image_embd_v.data() + offset);
-            offset += (size_t) n_mmproj_embd * n_tokens_per_image;
+            offset += static_cast<size_t>(n_mmproj_embd) * n_tokens_per_image;
         }
     } else {
         ok = clip_image_batch_encode(

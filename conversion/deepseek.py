@@ -101,6 +101,8 @@ class DeepseekOCR2VisionModel(DeepseekOCRVisionModel):
         if self.hparams.get("num_attention_heads") is None:
             self.hparams["num_attention_heads"] = 14
         super().set_gguf_parameters()
+        # qwen2 encoder is GQA: 14 Q heads, 2 KV heads
+        self.gguf_writer.add_vision_head_count_kv(2)
 
     def get_vision_config(self) -> dict[str, Any]:
         vision_config = super().get_vision_config()
@@ -223,6 +225,14 @@ class DeepseekV2Model(TextModel):
             self.gguf_writer.add_architecture()
             # default jinja template
             self.gguf_writer.add_chat_template("{% for m in messages %}{{m['content']}}{% endfor %}")
+
+    @classmethod
+    def filter_tensors(cls, item: tuple[str, Callable[[], Tensor]]) -> tuple[str, Callable[[], Tensor]] | None:
+        name, _ = item
+        # DeepSeek-OCR vision encoder (SAM + DeepSeek-OCR-2 qwen2 tower)
+        if "sam_model" in name or "qwen2_model" in name:
+            return None
+        return super().filter_tensors(item)
 
     def set_vocab(self):
         try:

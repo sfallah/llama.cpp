@@ -246,6 +246,7 @@ clip_graph::clip_graph(clip_ctx * ctx, const clip_image_f32 & img) :
         n_patches(n_patches_x * n_patches_y),
         n_embd(hparams.n_embd),
         n_head(hparams.n_head),
+        n_head_kv(hparams.n_head_kv),
         d_head(n_embd / n_head),
         n_layer(hparams.n_layer),
         n_mmproj_embd(clip_n_mmproj_embd(ctx)),
@@ -401,9 +402,9 @@ ggml_tensor * clip_graph::build_vit(
                     }
                 }
 
-                Qcur = ggml_reshape_3d(ctx0, Qcur, d_head, n_head, n_pos);
-                Kcur = ggml_reshape_3d(ctx0, Kcur, d_head, n_head, n_pos);
-                Vcur = ggml_reshape_3d(ctx0, Vcur, d_head, n_head, n_pos);
+                Qcur = ggml_reshape_3d(ctx0, Qcur, d_head, n_head,    n_pos);
+                Kcur = ggml_reshape_3d(ctx0, Kcur, d_head, n_head_kv, n_pos);
+                Vcur = ggml_reshape_3d(ctx0, Vcur, d_head, n_head_kv, n_pos);
 
                 if (norm_per_head) {
                     if (layer.q_norm) {
@@ -1124,6 +1125,9 @@ struct clip_model_loader {
             get_u32(string_format(KEY_PROJ_DIM,       prefix), hparams.projection_dim);
             get_f32(string_format(KEY_LAYER_NORM_EPS, prefix), hparams.eps);
 
+            // n_head_kv is optional (for GQA), default to n_head
+            hparams.n_head_kv = hparams.n_head;
+
             if (is_vision) {
                 get_u32(KEY_IMAGE_SIZE, hparams.image_size);
                 get_u32(KEY_PATCH_SIZE, hparams.patch_size);
@@ -1526,6 +1530,10 @@ struct clip_model_loader {
                         get_u32(KEY_SAM_N_HEAD, hparams.sam_n_head, true);
                         get_u32(KEY_SAM_N_EMBD, hparams.sam_n_embd, true);
                         get_u32(KEY_ATTN_WINDOW_SIZE, hparams.attn_window_size, true);
+                        if (model.proj_type == PROJECTOR_TYPE_DEEPSEEKOCR2) {
+                            // qwen2 encoder is GQA, requires KEY_N_HEAD_KV
+                            get_u32(string_format(KEY_N_HEAD_KV, "vision"), hparams.n_head_kv);
+                        }
                      } break;
                 case PROJECTOR_TYPE_HUNYUANVL:
                     {
@@ -1557,6 +1565,9 @@ struct clip_model_loader {
                         hparams.audio_n_fft            = 512;
                         hparams.audio_window_len       = 320;  // 20ms frame (NOT 25ms/400)
                         hparams.audio_hop_len          = 160;
+                        // due to a mistake in the original conversion code, rms_norm_eps is set to a wrong value
+                        // since all gemma4a models use 1e-6, we just hardcode it here to avoid re-conversion
+                        hparams.eps = 1e-6f;
                     } break;
                 case PROJECTOR_TYPE_GRANITE_SPEECH:
                     {
@@ -3285,7 +3296,7 @@ int clip_n_output_tokens(const struct clip_ctx * ctx, struct clip_image_f32 * im
         case PROJECTOR_TYPE_DEEPSEEKOCR:
         {
             // SAM encoder applies two stride-2 convolutions (net_2 and net_3)
-            // which reduces spatial dimensions by 4x in each direction (16x total)
+            // that reduce spatial dimensions by 4x in each direction (16x total)
             // E.g., 64x64 -> 16x16 patches
             n_patches /= 16;
 
@@ -3310,7 +3321,7 @@ int clip_n_output_tokens(const struct clip_ctx * ctx, struct clip_image_f32 * im
             // 1024 global view -> 256 query tokens + 1 view separator = 257;
             // 768 local tile   -> 144 query tokens, no separator.
             n_patches /= 16;
-            if (n_patches == 256) {
+            if (img->add_viewsep) {
                 n_patches += 1; // view separator, appended only after the global view
             }
         } break;
@@ -3926,6 +3937,34 @@ bool clip_image_batch_encode(clip_ctx * ctx, const int n_threads, const clip_ima
 
                 set_input_i32("rel_pos_indices_local", rel_pos_indices_local);
                 set_input_i32("rel_pos_indices_global", rel_pos_indices_global);
+
+                if (ctx->proj_type() == PROJECTOR_TYPE_DEEPSEEKOCR2) {
+
+                    // qwen2 encoder attention mask
+
+                    // num_image_tokens = num_patches / 16
+                    //   256 for 1024 global view
+                    //   144 for 768 tile views
+                    const int   num_image_tokens = num_patches / 16;
+                    const int   seq_len          = num_image_tokens * 2;
+                    std::vector qwen2_mask(static_cast<size_t>(seq_len) * seq_len, 0.0f);
+
+                    // attention mask layout
+                    //  +--------------+---------------+
+                    //  |    all 0     |   all -inf    |
+                    //  +--------------+---------------+
+                    //  |    all 0     |  lower tri 0  |
+                    //  +--------------+---------------+
+                    for (int i = 0; i < seq_len; i++) {
+                        for (int j = 0; j < seq_len; j++) {
+                            const bool zero = i < num_image_tokens ?
+                                                     j < num_image_tokens :
+                                                     j < num_image_tokens || j <= i;
+                            qwen2_mask[static_cast<size_t>(i) * seq_len + j] = zero ? 0.0f : -1e9f;
+                        }
+                    }
+                    set_input_f32("qwen2_attn_mask", qwen2_mask);
+                }
             } break;
         case PROJECTOR_TYPE_GEMMA3:
         case PROJECTOR_TYPE_GEMMA3NV:

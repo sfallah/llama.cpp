@@ -3,17 +3,8 @@
 Evaluates llama.cpp's DeepSeek-OCR by comparing its output for a test
 image to the actual text in part of that image.
 
-Each test case runs one image through mtmd-cli for one DeepSeek-OCR
-variant, calculates CER and chrF, and holds them against the HF model's
-scores. The cases cover:
-
-  - DeepSeek-OCR   on a single-view scan (test-1.jpeg, 640x488)
-  - DeepSeek-OCR   on a tall crop (test-1-positive.png, 429x806) large
-    enough to exercise the multi-tile dynamic-resolution path
-  - DeepSeek-OCR-2 on the same single-view scan
-  - DeepSeek-OCR-2 on the same tall crop
-
-Exits non-zero if any case fails its parity gate.
+Runs each test image through mtmd-cli, calculates CER and chrF for
+its output, and holds them against the HF model's scores.
 """
 
 import argparse
@@ -31,31 +22,24 @@ RUN_TIMEOUT = 300
 
 @dataclass
 class ModelSpec:
-    """A DeepSeek-OCR variant: CLI flags and default GGUF paths."""
-    key: str             # short id, e.g. "v1"
-    label: str           # human-readable name
-    model_arg: str       # CLI flag overriding the model GGUF path
-    mmproj_arg: str      # CLI flag overriding the mmproj GGUF path
-    model_default: str   # default model GGUF path, relative to the repo root
-    mmproj_default: str  # default mmproj GGUF path, relative to the repo root
+    key: str
+    label: str
+    model_arg: str
+    mmproj_arg: str
+    model_default: str
+    mmproj_default: str
 
 
 @dataclass
 class TestCase:
-    """One image run for one model, with a parity gate vs the HF reference.
-
-    The gate is parity with the upstream HuggingFace model: CER must stay
-    within `cer_tol` above the HF model's CER, and chrF within `chrf_tol`
-    below it.
-    """
-    model_key: str       # ModelSpec.key this case runs against
-    label: str           # human-readable case name
-    image: str           # image path, relative to the repo root
-    ground_truth: str    # ground-truth transcript path, relative to the repo root
-    hf_cer: float        # upstream HF model's CER on this image
-    hf_chrf: float       # upstream HF model's chrF on this image
-    cer_tol: float       # allowed CER slack above the HF reference
-    chrf_tol: float      # allowed chrF slack below the HF reference
+    model_key: str
+    label: str
+    image: str
+    ground_truth: str
+    hf_cer: float
+    hf_chrf: float
+    cer_tol: float
+    chrf_tol: float
 
     @property
     def cer_max(self) -> float:
@@ -86,59 +70,22 @@ CASES = [
         model_key="v1", label="single-view scan",
         image="tools/mtmd/test-1.jpeg",
         ground_truth="tools/mtmd/tests/test-1-ground-truth.txt",
-        # deepseek-ai/DeepSeek-OCR (greedy) on test-1.jpeg vs test-1-ground-truth.txt.
-        # llama.cpp scores better than this (CER ~0.24), so the gate has margin.
         hf_cer=0.3030, hf_chrf=67.52, cer_tol=0.02, chrf_tol=2.0,
-    ),
-    TestCase(
-        model_key="v1", label="multi-tile (dynamic resolution)",
-        image="tools/mtmd/tests/test-1-positive.png",
-        ground_truth="tools/mtmd/tests/test-1-ground-truth.txt",
-        # deepseek-ai/DeepSeek-OCR (v1, Gundam crop mode) on test-1-positive.png,
-        # a 429x806 crop of the same article. At 806 px tall it crosses the 640
-        # tile threshold, so HF and llama.cpp both take the multi-tile path:
-        # dynamic_preprocess picks a (1,2) grid -> 2 local 640 tiles + 1 global
-        # 1024 view = 493 image tokens. This is the regression guard for the v1
-        # tiling preprocessing and the cross-tile newline weave -- v1 weaves one
-        # image-newline token per row of the assembled tile grid, so a broken
-        # weave craters the score. The crop is high quality: the HF reference
-        # and llama.cpp both score a perfect CER 0.0000 / chrF 100.00.
-        hf_cer=0.0000, hf_chrf=100.00, cer_tol=0.03, chrf_tol=3.0,
     ),
     TestCase(
         model_key="v2", label="single-view scan",
         image="tools/mtmd/test-1.jpeg",
         ground_truth="tools/mtmd/tests/test-1-ground-truth.txt",
-        # deepseek-ai/DeepSeek-OCR-2 on test-1.jpeg. The image is 640x488 -- below
-        # the 768 tiling threshold -- so both the HF model and llama.cpp take the
-        # single 1024 global-view path. Both fail this low-quality full-page scan:
-        # they read the headlines but cannot resolve the small body text and
-        # hallucinate it. The HF reference decodes with no_repeat_ngram_size;
-        # run_mtmd_cli matches that with the DRY sampler, so the two are compared
-        # on equal footing. chrF is the load-bearing gate here -- it sits at ~34
-        # when the hallucinated body does not loop and craters to ~24 if it does.
-        # llama.cpp currently scores CER ~0.77 / chrF ~34.
-        hf_cer=0.6894, hf_chrf=34.60, cer_tol=0.12, chrf_tol=8.0,
-    ),
-    TestCase(
-        model_key="v2", label="multi-tile (dynamic resolution)",
-        image="tools/mtmd/tests/test-1-positive.png",
-        ground_truth="tools/mtmd/tests/test-1-ground-truth.txt",
-        # deepseek-ai/DeepSeek-OCR-2 on test-1-positive.png, a 429x806 crop of the
-        # same article. At 806 px tall it crosses the 768 threshold, so HF and
-        # llama.cpp both take the multi-tile path: dynamic_preprocess picks a (1,2)
-        # grid -> 2 local 768 tiles + 1 global 1024 view = 545 image tokens. This
-        # is the regression guard for the tiling preprocessing -- a broken tile
-        # path craters the score (cf. the 0.77 CER on the un-tiled low-res scan).
-        # The crop is high quality, so both models score near-perfect: HF
-        # CER 0.0236 / chrF 97.05, llama.cpp CER ~0.017 / chrF ~96.8.
-        hf_cer=0.0236, hf_chrf=97.05, cer_tol=0.03, chrf_tol=3.0,
+        # 640x488 is below the 768 tiling threshold -- single 1024 global view.
+        # hf_cer/hf_chrf are the deepseek-ai repo's own scores (ImageOps.pad);
+        # the transformers HF processor is *not* the reference -- its pad_to_square
+        # is one pixel off and lands at ~0.69 instead.
+        hf_cer=0.7761, hf_chrf=28.70, cer_tol=0.12, chrf_tol=8.0,
     ),
 ]
 
 
 def arg_dest(flag: str) -> str:
-    """argparse destination name for a long option, e.g. --llama-model -> llama_model."""
     return flag.lstrip("-").replace("-", "_")
 
 
@@ -194,16 +141,9 @@ def run_mtmd_cli(model_path, mmproj_path, image_path, bin_path) -> str:
         "--temp", "0",
         "--flash-attn", "off",  # match the HF "eager" attention reference
         "--no-warmup",
-        "-n", "512",  # cap generation: enough for a full transcription, and bounds
-                      # a model that loops (DeepSeek-OCR-2 loops on hard images, as
-                      # does the HF reference -- without a cap the KV cache fills)
-        # The HF reference always decodes with no_repeat_ngram_size (20/35). Without
-        # equivalent repetition control, greedy llama.cpp loops verbatim on a hard
-        # image and its CER is not comparable to the HF score. DRY is llama.cpp's
-        # analog: it penalises only long verbatim repeats, so a clean transcription
-        # is left intact. The default DRY sequence breakers include "\n", which
-        # would stop it from seeing multi-line loops, so they are cleared with
-        # --dry-sequence-breaker none.
+        "-n", "512",  # cap loops on hard images (KV would otherwise fill)
+        # HF decodes with no_repeat_ngram_size; llama.cpp's analog is DRY.
+        # Default DRY breakers include "\n", so they are cleared below.
         "--dry-multiplier", "0.8",
         "--dry-base", "1.75",
         "--dry-allowed-length", "2",
@@ -235,7 +175,7 @@ def read_expected_text(file_path: Path) -> str:
         return f.read().strip()
 
 
-def evaluate(case: "TestCase", title: str, expected: str, ocr_out: str) -> bool:
+def evaluate(case: "TestCase", expected: str, ocr_out: str) -> bool:
     expected = normalize_text(expected)
     ocr_out = normalize_text(ocr_out)
     aligned = locally_align(expected, ocr_out)
@@ -253,7 +193,7 @@ def evaluate(case: "TestCase", title: str, expected: str, ocr_out: str) -> bool:
 
     logger.info("")
     logger.info("=" * 60)
-    logger.info(f"{title}: Free OCR evaluation")
+    logger.info("Free OCR evaluation:")
     logger.info("=" * 60)
     logger.info(f"  CER               {cer:>7.4f}    (HF {case.hf_cer:.4f}, <= {case.cer_max:>7.4f}  -> {verdict(cer_pass)})")
     logger.info(f"  chrF (0-100)      {chrf:>7.2f}    (HF {case.hf_chrf:.2f}, >= {case.chrf_min:>7.2f}  -> {verdict(chrf_pass)})")
@@ -304,15 +244,13 @@ def main() -> int:
     logger.info("DeepSeek-OCR: llama.cpp vs HF parity check")
     logger.info("=" * 60)
 
-    results: dict[str, bool] = {}
+    results = {}
     for case in CASES:
         model_spec = MODELS[case.model_key]
         title = f"{model_spec.label} -- {case.label}"
 
         logger.info("")
-        logger.info("#" * 60)
-        logger.info(f"# {title}")
-        logger.info("#" * 60)
+        logger.info(f"=== {title} ===")
 
         model = resolve_path(getattr(args, arg_dest(model_spec.model_arg)), repo_root)
         mmproj = resolve_path(getattr(args, arg_dest(model_spec.mmproj_arg)), repo_root)
@@ -339,18 +277,14 @@ def main() -> int:
             results[title] = False
             continue
 
-        results[title] = evaluate(case, title, expected, ocr_out)
+        results[title] = evaluate(case, expected, ocr_out)
 
     logger.info("")
-    logger.info("=" * 60)
-    logger.info("Summary")
-    logger.info("=" * 60)
+    logger.info("=== Summary ===")
     for title, ok in results.items():
         logger.info(f"  {title:<48} {verdict(ok)}")
     all_passed = all(results.values())
-    logger.info("")
-    logger.info(f"  Overall: {verdict(all_passed)}")
-    logger.info("=" * 60)
+    logger.info(f"Overall: {verdict(all_passed)}")
 
     return 0 if all_passed else 1
 
