@@ -120,6 +120,66 @@ static clip_flash_attn_type mtmd_get_clip_flash_attn_type(enum llama_flash_attn_
     return CLIP_FLASH_ATTN_TYPE_AUTO;
 }
 
+// extra image-newline tokens woven across the v1 local tile grid (0 if no tiles)
+static size_t deepseekocr_v1_grid_newlines(const clip_image_f32_batch & batch, clip_ctx * ctx_v) {
+    if (batch.entries.size() <= 1) { // only the global view
+        return 0;
+    }
+    const int tile_h = static_cast<int>(std::sqrt(
+        static_cast<float>(clip_n_output_tokens(ctx_v, batch.entries[0].get()))));
+    return static_cast<size_t>(batch.grid_y) * tile_h;
+}
+
+// v1 tile encode: weave each tile's raw patches across the grid with one
+// image-newline per grid row, then encode the global view in place
+static bool encode_deepseekocr_v1(clip_ctx * ctx_clip,
+                                  int n_threads,
+                                  const clip_image_f32_batch & batch,
+                                  float * out) {
+    const auto & entries    = batch.entries;
+    const int    wcrop      = batch.grid_x;
+    const int    hcrop      = batch.grid_y;
+    const int    n_tiles    = static_cast<int>(entries.size()) - 1; // global view is last
+    const int    n_mmproj_embd = clip_n_mmproj_embd(ctx_clip);
+
+    if (n_tiles > 0) {
+        const int    tile_tokens = clip_n_output_tokens(ctx_clip, entries[0].get());
+        const int    tile_h      = static_cast<int>(std::sqrt(static_cast<float>(tile_tokens)));
+        const size_t row_sz      = static_cast<size_t>(tile_h) * n_mmproj_embd;
+        const size_t tile_sz     = static_cast<size_t>(tile_tokens) * n_mmproj_embd;
+
+        std::vector<float> raw(static_cast<size_t>(n_tiles) * tile_sz);
+        for (int i = 0; i < n_tiles; i++) {
+            if (!clip_image_encode(ctx_clip, n_threads, entries[i].get(),
+                                   raw.data() + static_cast<size_t>(i) * tile_sz)) {
+                return false;
+            }
+        }
+
+        // image-newline embedding (shared with the graph)
+        const ggml_tensor * nl_t = clip_get_newline_tensor(ctx_clip);
+        GGML_ASSERT(nl_t != nullptr);
+        GGML_ASSERT(nl_t->type == GGML_TYPE_F32);
+        GGML_ASSERT(ggml_nelements(nl_t) == n_mmproj_embd);
+        std::vector<float> newline(n_mmproj_embd);
+        ggml_backend_tensor_get(nl_t, newline.data(), 0, ggml_nbytes(nl_t));
+
+        for (int r = 0; r < hcrop; r++) {
+            for (int pr = 0; pr < tile_h; pr++) {
+                for (int c = 0; c < wcrop; c++) {
+                    const float * tile = raw.data() + static_cast<size_t>(r * wcrop + c) * tile_sz;
+                    memcpy(out, tile + static_cast<size_t>(pr) * row_sz, row_sz * sizeof(float));
+                    out += row_sz;
+                }
+                memcpy(out, newline.data(), static_cast<size_t>(n_mmproj_embd) * sizeof(float));
+                out += n_mmproj_embd;
+            }
+        }
+    }
+
+    return clip_image_encode(ctx_clip, n_threads, entries.back().get(), out);
+}
+
 mtmd_context_params mtmd_context_params_default() {
     mtmd_context_params params {
         /* use_gpu           */ true,
@@ -862,14 +922,8 @@ struct mtmd_tokenizer {
                 for (const auto & entry : batch_f32.entries) {
                     n_tokens += clip_n_output_tokens(ctx->ctx_v, entry.get());
                 }
-                // DeepSeek-OCR (v1) weaves one image-newline token per row of the
-                // local tile grid in mtmd_encode; clip_n_output_tokens counts the
-                // raw tile patches only, so add the grid-row newlines here.
-                if (ctx->proj_type_v() == PROJECTOR_TYPE_DEEPSEEKOCR
-                        && (batch_f32.grid_x > 1 || batch_f32.grid_y > 1)) {
-                    const int tile_h = static_cast<int>(std::sqrt(
-                        static_cast<float>(clip_n_output_tokens(ctx->ctx_v, batch_f32.entries[0].get()))));
-                    n_tokens += static_cast<size_t>(batch_f32.grid_y) * tile_h;
+                if (ctx->proj_type_v() == PROJECTOR_TYPE_DEEPSEEKOCR) {
+                    n_tokens += deepseekocr_v1_grid_newlines(batch_f32, ctx->ctx_v);
                 }
 
                 mtmd_image_tokens_ptr image_tokens(new mtmd_image_tokens);
@@ -1103,57 +1157,7 @@ int32_t mtmd_encode(mtmd_context * ctx, const mtmd_image_tokens * image_tokens) 
     bool ok = false;
 
     if (proj_type == PROJECTOR_TYPE_DEEPSEEKOCR) {
-        // DeepSeek-OCR (v1): encode each 640 local tile to raw tile_h*tile_h
-        // features, then weave them into the assembled tile grid with one
-        // image-newline token per grid row -- this reproduces the layout of
-        // build_global_local_features() in modeling_deepseekocr.py, whose
-        // newlines span the full tile grid rather than a single tile. The 1024
-        // global view is the last entry and is encoded straight into place: the
-        // graph already wove its newlines and the trailing view separator.
-        const auto & entries = image_tokens->batch_f32.entries;
-        const int wcrop   = image_tokens->batch_f32.grid_x;
-        const int hcrop   = image_tokens->batch_f32.grid_y;
-        const int n_tiles = (wcrop > 1 || hcrop > 1) ? wcrop * hcrop : 0;
-
-        float * out = ctx->image_embd_v.data();
-        ok = true;
-
-        if (n_tiles > 0) {
-            const int    tile_tokens = clip_n_output_tokens(ctx_clip, entries[0].get());
-            const int    tile_h      = static_cast<int>(std::sqrt((float) tile_tokens));
-            const size_t row_sz      = static_cast<size_t>(tile_h) * n_mmproj_embd;  // one patch-row
-            const size_t tile_sz     = static_cast<size_t>(tile_tokens) * n_mmproj_embd;
-
-            // raw per-tile features
-            std::vector<float> raw((size_t) n_tiles * tile_sz);
-            for (int i = 0; i < n_tiles && ok; i++) {
-                ok = clip_image_encode(ctx_clip, ctx->n_threads, entries[i].get(),
-                                       raw.data() + (size_t) i * tile_sz);
-            }
-
-            // image-newline embedding (a model parameter shared with the graph)
-            std::vector<float> newline(n_mmproj_embd);
-            clip_get_newline_embd(ctx_clip, newline.data());
-
-            // weave: for each tile-grid row, interleave the matching patch-row of
-            // every tile in that row, then append one image-newline token.
-            for (int r = 0; r < hcrop && ok; r++) {
-                for (int pr = 0; pr < tile_h; pr++) {
-                    for (int c = 0; c < wcrop; c++) {
-                        const float * tile = raw.data() + static_cast<size_t>(r * wcrop + c) * tile_sz;
-                        memcpy(out, tile + static_cast<size_t>(pr) * row_sz, row_sz * sizeof(float));
-                        out += row_sz;
-                    }
-                    memcpy(out, newline.data(), static_cast<size_t>(n_mmproj_embd) * sizeof(float));
-                    out += n_mmproj_embd;
-                }
-            }
-        }
-
-        // global view (last entry): woven in-graph, encoded straight into place
-        if (ok) {
-            ok = clip_image_encode(ctx_clip, ctx->n_threads, entries.back().get(), out);
-        }
+        ok = encode_deepseekocr_v1(ctx_clip, ctx->n_threads, image_tokens->batch_f32, ctx->image_embd_v.data());
     } else if (clip_is_llava(ctx_clip)
         || proj_type == PROJECTOR_TYPE_MINICPMV
         || proj_type == PROJECTOR_TYPE_GLM_EDGE

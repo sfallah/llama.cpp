@@ -3034,13 +3034,6 @@ ggml_tensor * clip_get_newline_tensor(const struct clip_ctx * ctx) {
     return ctx->model.image_newline;
 }
 
-void clip_get_newline_embd(const struct clip_ctx * ctx, float * out) {
-    ggml_tensor * nl = ctx->model.image_newline;
-    GGML_ASSERT(nl != nullptr);
-    GGML_ASSERT(ggml_nbytes(nl) == static_cast<size_t>(clip_n_mmproj_embd(ctx)) * sizeof(float));
-    ggml_backend_tensor_get(nl, out, 0, ggml_nbytes(nl));
-}
-
 void clip_free(clip_ctx * ctx) {
     if (ctx == nullptr) {
         return;
