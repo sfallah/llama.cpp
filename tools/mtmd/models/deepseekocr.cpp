@@ -303,11 +303,8 @@ ggml_cgraph * clip_graph_deepseekocr::build() {
     cur = ggml_mul_mat(ctx0, model.mm_fc_w, cur);
     cur = ggml_add(ctx0, cur, model.mm_fc_b);
 
-    // The 1024 global view weaves one image-newline token per row and a
-    // trailing view separator in-graph -> h*(w+1) + 1 tokens. 640 local tiles
-    // are emitted raw: their newlines span the full tile grid (across tiles),
-    // so they are woven in mtmd_encode once every tile has been encoded.
-    if (clip_n_patches == 256) {
+    // global view: weave one newline per row + trailing view separator
+    if (img.add_viewsep) {
         const auto h     = static_cast<int>(std::sqrt(static_cast<float>(cur->ne[1])));
         const auto w     = h;
         const auto n_dim = cur->ne[0];

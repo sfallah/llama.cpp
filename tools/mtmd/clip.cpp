@@ -3295,16 +3295,11 @@ int clip_n_output_tokens(const struct clip_ctx * ctx, struct clip_image_f32 * im
             } break;
         case PROJECTOR_TYPE_DEEPSEEKOCR:
         {
-            // SAM encoder applies two stride-2 convolutions (net_2 and net_3)
-            // that reduce spatial dimensions by 4x in each direction (16x total)
-            // E.g., 64x64 -> 16x16 patches
+            // SAM net_2/net_3 stride-2 convs reduce HxW by 16x total
             n_patches /= 16;
 
-            // 1024 global view -> 256 query tokens; the graph weaves one image
-            // newline per row and a trailing view separator -> h*(w+1) + 1.
-            // 640 local tiles -> 100 query tokens, emitted raw; the newlines for
-            // the tile grid are woven across all tiles in mtmd_encode.
-            if (n_patches == 256) {
+            // global view: weave one newline per row + trailing view separator
+            if (img->add_viewsep) {
                 int h = static_cast<int>(std::sqrt(static_cast<float>(n_patches)));
                 n_patches = h * (h + 1) + 1;
             }
