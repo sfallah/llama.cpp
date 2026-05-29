@@ -332,6 +332,7 @@ static bool moe_mandatory(const llm_arch arch) {
         case LLM_ARCH_ARCTIC:
         case LLM_ARCH_DEEPSEEK:
         case LLM_ARCH_DEEPSEEK2:
+        case LLM_ARCH_DEEPSEEK2OCR:
         case LLM_ARCH_GLM4_MOE:
         case LLM_ARCH_GLM_DSA:
         case LLM_ARCH_EXAONE_MOE:
@@ -403,9 +404,6 @@ static bool arch_supported(const llm_arch arch) {
     }
     if (arch == LLM_ARCH_PLM) {
         return false; // TODO tensor shapes
-    }
-    if (arch == LLM_ARCH_DEEPSEEK2OCR) {
-        return false;
     }
 
     // FIXME some models are segfaulting with WebGPU:
