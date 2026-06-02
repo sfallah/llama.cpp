@@ -156,13 +156,9 @@ static bool encode_deepseekocr_v1(clip_ctx * ctx_clip,
             }
         }
 
-        // image-newline embedding (shared with the graph)
-        const ggml_tensor * nl_t = clip_get_newline_tensor(ctx_clip);
-        GGML_ASSERT(nl_t != nullptr);
-        GGML_ASSERT(nl_t->type == GGML_TYPE_F32);
-        GGML_ASSERT(ggml_nelements(nl_t) == n_mmproj_embd);
-        std::vector<float> newline(n_mmproj_embd);
-        ggml_backend_tensor_get(nl_t, newline.data(), 0, ggml_nbytes(nl_t));
+        // image-newline embedding, cached host-side at load (shared with the graph)
+        const float * newline = clip_get_newline_embd(ctx_clip);
+        GGML_ASSERT(newline != nullptr);
 
         for (int r = 0; r < hcrop; r++) {
             for (int pr = 0; pr < tile_h; pr++) {
@@ -171,7 +167,7 @@ static bool encode_deepseekocr_v1(clip_ctx * ctx_clip,
                     memcpy(out, tile + static_cast<size_t>(pr) * row_sz, row_sz * sizeof(float));
                     out += row_sz;
                 }
-                memcpy(out, newline.data(), static_cast<size_t>(n_mmproj_embd) * sizeof(float));
+                memcpy(out, newline, static_cast<size_t>(n_mmproj_embd) * sizeof(float));
                 out += n_mmproj_embd;
             }
         }

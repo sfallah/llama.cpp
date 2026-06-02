@@ -369,6 +369,7 @@ struct clip_model {
     ggml_tensor * mm_2_b = nullptr;
 
     ggml_tensor * image_newline = nullptr;
+    std::vector<float> image_newline_f32; // host copy of image_newline, read once at load
     ggml_tensor * view_seperator = nullptr;
 
 

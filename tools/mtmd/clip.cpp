@@ -2649,6 +2649,14 @@ struct clip_model_loader {
             }
             fin.close();
 
+            // cache the image-newline embedding host-side: it is a static weight, so
+            // read it once here instead of pulling it off the backend on every encode
+            if (model.image_newline != nullptr && model.image_newline->type == GGML_TYPE_F32) {
+                model.image_newline_f32.resize(ggml_nelements(model.image_newline));
+                ggml_backend_tensor_get(model.image_newline, model.image_newline_f32.data(),
+                                        0, ggml_nbytes(model.image_newline));
+            }
+
             LOG_DBG("%s: loaded %zu tensors from %s\n", __func__, tensors_to_load.size(), fname.c_str());
         }
 
@@ -3030,8 +3038,8 @@ void clip_build_img_from_pixels(const unsigned char * rgb_pixels, int nx, int ny
     memcpy(img->buf.data(), rgb_pixels, img->buf.size());
 }
 
-ggml_tensor * clip_get_newline_tensor(const struct clip_ctx * ctx) {
-    return ctx->model.image_newline;
+const float * clip_get_newline_embd(const struct clip_ctx * ctx) {
+    return ctx->model.image_newline_f32.empty() ? nullptr : ctx->model.image_newline_f32.data();
 }
 
 void clip_free(clip_ctx * ctx) {
