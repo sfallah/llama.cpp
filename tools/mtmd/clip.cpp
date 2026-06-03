@@ -961,10 +961,6 @@ static ggml_cgraph * clip_image_build_graph(clip_ctx * ctx, const clip_image_f32
              {
                 builder = std::make_unique<clip_graph_deepseekocr2>(ctx, img);
             } break;
-        case PROJECTOR_TYPE_DEEPSEEKOCR2:
-             {
-                builder = std::make_unique<clip_graph_deepseekocr2>(ctx, img);
-            } break;
         case PROJECTOR_TYPE_LFM2A:
             {
                 builder = std::make_unique<clip_graph_conformer>(ctx, img);
