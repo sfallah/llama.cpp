@@ -976,11 +976,13 @@ static ggml_cgraph * clip_image_build_graph(clip_ctx * ctx, const clip_image_f32
             } break;
         case PROJECTOR_TYPE_DEEPSEEKOCR:
             {
-                builder = std::make_unique<clip_graph_deepseekocr>(ctx, img);
+                // same builder for single image (grid 1x1) and batched tiles (grid_x*grid_y of them)
+                builder = std::make_unique<clip_graph_deepseekocr>(ctx, img, imgs.grid_x, imgs.grid_y);
             } break;
         case PROJECTOR_TYPE_DEEPSEEKOCR2:
              {
-                builder = std::make_unique<clip_graph_deepseekocr2>(ctx, img);
+                // same builder for single image (grid 1x1) and batched tiles (grid_x*grid_y of them);
+                builder = std::make_unique<clip_graph_deepseekocr2>(ctx, img, imgs.grid_x, imgs.grid_y);
             } break;
         case PROJECTOR_TYPE_LFM2A:
             {
@@ -1559,7 +1561,7 @@ struct clip_model_loader {
                     {
                         hparams.patch_size = 16;
                         hparams.image_size = 1024;
-                        hparams.warmup_image_size = 1024;
+                        hparams.warmup_image_size = hparams.image_size; // global view is fixed at image_size
                         hparams.image_resize_algo = RESIZE_ALGO_BICUBIC_PILLOW;
                         hparams.image_pad_color = {127, 127, 127};
 
@@ -1567,7 +1569,17 @@ struct clip_model_loader {
                         get_u32(KEY_SAM_N_HEAD, hparams.sam_n_head, true);
                         get_u32(KEY_SAM_N_EMBD, hparams.sam_n_embd, true);
                         get_u32(KEY_ATTN_WINDOW_SIZE, hparams.attn_window_size, true);
+                        // dynamic-resolution tiling config
+                        hparams.preproc_min_tiles = 2;
+                        if (model.proj_type == PROJECTOR_TYPE_DEEPSEEKOCR) {
+                            hparams.preproc_max_tiles = 9;
+                            hparams.preproc_tile_size = 640;
+                            // the CLIP/ViT body runs at 1e-5
+                            hparams.eps = 1e-5f;
+                        }
                         if (model.proj_type == PROJECTOR_TYPE_DEEPSEEKOCR2) {
+                            hparams.preproc_max_tiles = 6;
+                            hparams.preproc_tile_size = 768;
                             // qwen2 encoder is GQA, requires KEY_N_HEAD_KV
                             get_u32(string_format(KEY_N_HEAD_KV, "vision"), hparams.n_head_kv);
                         }
@@ -2819,6 +2831,37 @@ struct clip_model_loader {
         std::vector<support_info_op> ops;
     };
 
+    // reserve for the worst-case DeepSeek-OCR (v1+v2) tile batch
+    static void reserve_dsocr_max_tiles(clip_ctx & ctx_clip) {
+        const auto proj = ctx_clip.proj_type();
+        if (proj != PROJECTOR_TYPE_DEEPSEEKOCR && proj != PROJECTOR_TYPE_DEEPSEEKOCR2) {
+            return;
+        }
+        const auto & hparams   = ctx_clip.model.hparams;
+        const int    max_tiles = hparams.preproc_max_tiles;
+        const int    tile_size = hparams.preproc_tile_size;
+        if (max_tiles <= 1 || tile_size <= 0) {
+            return;
+        }
+
+        // v1 weaves a newline per grid row
+        const int grid_x = 1;
+        const int grid_y = max_tiles;
+
+        clip_image_f32_batch tiles;
+        for (int i = 0; i < max_tiles; i++) {
+            clip_image_f32_ptr tile(clip_image_f32_init());
+            tile->set_size({tile_size, tile_size}, /*is_placeholder=*/true, /*is_audio=*/false);
+            tiles.entries.push_back(std::move(tile));
+        }
+        tiles.grid_x = grid_x;
+        tiles.grid_y = grid_y;
+
+        LOG_INF("%s: reserving worst-case tile batch: %d tiles (%dx%d grid) @ %dx%d\n",
+                __func__, max_tiles, grid_x, grid_y, tile_size, tile_size);
+        reserve_compute_meta(ctx_clip, tiles);
+    }
+
     static void warmup(clip_ctx & ctx_clip) {
         // create a fake batch
         const auto & hparams = ctx_clip.model.hparams;
@@ -2834,6 +2877,9 @@ struct clip_model_loader {
         }
         batch.entries.push_back(std::move(img));
         warmup(ctx_clip, batch);
+
+        // DeepSeek-OCR v1+v2: warmup's (worst-case) max tiles batch + global view;
+        reserve_dsocr_max_tiles(ctx_clip);
     }
 
     static void warmup(clip_ctx & ctx_clip, const clip_image_f32_batch & batch) {
@@ -3234,7 +3280,7 @@ int clip_n_output_tokens_y(const struct clip_ctx * ctx, struct clip_image_f32 * 
     return 1;
 }
 
-int clip_n_output_tokens(const struct clip_ctx * ctx, struct clip_image_f32 * img) {
+int clip_n_output_tokens(const struct clip_ctx * ctx, struct clip_image_f32 * img, int grid_x, int grid_y) {
     const auto & params = ctx->model.hparams;
 
     // for models with fixed size image, the input image is already pre-processed and resized to square
@@ -3409,17 +3455,25 @@ int clip_n_output_tokens(const struct clip_ctx * ctx, struct clip_image_f32 * im
                 n_patches += 2; // for BOI and EOI token embeddings
             } break;
         case PROJECTOR_TYPE_DEEPSEEKOCR:
-        {
-            // SAM encoder applies two stride-2 convolutions (net_2 and net_3)
-            // that reduce spatial dimensions by 4x in each direction (16x total)
-            // E.g., 64x64 -> 16x16 patches
-            n_patches /= 16;
+            {
+                // SAM encoder applies two stride-2 convolutions (net_2 and net_3)
+                // that reduce spatial dimensions by 4x in each direction (16x total)
+                // E.g., 64x64 -> 16x16 patches
+                n_patches /= 16;
 
-            // build_global_local_features adds image newlines and view separator
-            // Formula: h*(w+1) + 1 where h = w = sqrt(n_patches)
-            int h = static_cast<int>(std::sqrt(static_cast<float>(n_patches)));
-            n_patches = h * (h + 1) + 1;
-        } break;
+                // global view (add_viewsep) is encoded single-image, never with a tile grid
+                GGML_ASSERT(!(img->add_viewsep && (grid_x > 1 || grid_y > 1)));
+
+                const int h = static_cast<int>(std::sqrt(static_cast<float>(n_patches)));
+                if (grid_x > 1 || grid_y > 1) {
+                    // tiles: the batched graph lays them out on the grid_x x grid_y grid
+                    // and weaves one newline per row, emitting a single combined output
+                    n_patches = (h * grid_x + 1) * (h * grid_y);
+                } else if (img->add_viewsep) {
+                    // global view: weave one newline per row + trailing view separator
+                    n_patches = h * (h + 1) + 1;
+                }
+            } break;
         case PROJECTOR_TYPE_HUNYUANVL:
             {
                 int merge = ctx->model.hparams.n_merge;
@@ -3428,14 +3482,20 @@ int clip_n_output_tokens(const struct clip_ctx * ctx, struct clip_image_f32 * im
                 n_patches = (ow + 1) * oh + 2;
             } break;
         case PROJECTOR_TYPE_DEEPSEEKOCR2:
-        {
-            // 1024 global view -> 256 query tokens + 1 view separator = 257;
-            // 768 local tile   -> 144 query tokens, no separator.
-            n_patches /= 16;
-            if (img->add_viewsep) {
-                n_patches += 1; // view separator, appended only after the global view
-            }
-        } break;
+            {
+                // 1024 global view -> 256 query tokens + 1 view separator = 257;
+                // 768 local tile   -> 144 query tokens, no separator.
+                n_patches /= 16;
+
+                // global view (add_viewsep) is encoded single-image, never with a tile grid
+                GGML_ASSERT(!(img->add_viewsep && (grid_x > 1 || grid_y > 1)));
+                if (img->add_viewsep) {
+                    n_patches += 1; // view separator, appended only after the global view
+                } else if (grid_x > 1 || grid_y > 1) {
+                    // tiles concatenate their per-tile query tokens (grid_x*grid_y of them); no in-graph weave
+                    n_patches = n_patches * grid_x * grid_y;
+                }
+            } break;
         case PROJECTOR_TYPE_LFM2A:
             {
                 n_patches = ((((img->nx() + 1) / 2) + 1) / 2 + 1) / 2;
@@ -3497,7 +3557,8 @@ bool clip_image_batch_encode(clip_ctx * ctx, const int n_threads, const clip_ima
     const clip_image_f32_batch & imgs = *imgs_c_ptr;
     int n_batch_cur = imgs.entries.size();
 
-    // maximum supported batch size, usually == 2 for qwen-vl-based models
+    // maximum batch the encode graph supports: 2 for qwen-vl frame-merge,
+    // the full tile grid for DSOCR, 1 otherwise
     int n_batch_max = clip_model_n_batch_max(ctx);
 
     // TODO @ngxson : implement batch size > 1 as a loop
@@ -3582,6 +3643,8 @@ bool clip_image_batch_encode(clip_ctx * ctx, const int n_threads, const clip_ima
             const int n  = nx * ny;
 
             for (int b = 0; b < n_batch_cur; b++) {
+                // every entry must share entries[0]'s spatial size (see note above)
+                GGML_ASSERT(imgs.entries[b]->nx() == nx && imgs.entries[b]->ny() == ny);
                 const auto & buf = imgs.entries[b]->get_ro_buf();
                 float * batch_entry = inp_raw.data() + b * (3*n);
                 for (int y = 0; y < ny; y++) {
@@ -4416,9 +4479,9 @@ bool clip_image_batch_encode(clip_ctx * ctx, const int n_threads, const clip_ima
     // the last node is the embedding tensor
     ggml_tensor * embeddings = ggml_graph_node(gf, -1);
 
-    // sanity check (only support batch size of 1 for now)
+    // sanity check
     const int n_tokens_out = embeddings->ne[1];
-    const int expected_n_tokens_out = clip_n_output_tokens(ctx, imgs.entries[0].get());
+    const int expected_n_tokens_out = clip_n_output_tokens(ctx, imgs.entries[0].get(), imgs.grid_x, imgs.grid_y);
     if (n_tokens_out != expected_n_tokens_out) {
         LOG_ERR("%s: expected output %d tokens, got %d\n", __func__, expected_n_tokens_out, n_tokens_out);
         GGML_ABORT("Invalid number of output tokens");
@@ -4576,6 +4639,10 @@ int clip_model_n_batch_max(const struct clip_ctx * ctx) {
         case PROJECTOR_TYPE_QWEN25VL:
         case PROJECTOR_TYPE_QWEN3VL:
             return 2;
+        case PROJECTOR_TYPE_DEEPSEEKOCR:
+        case PROJECTOR_TYPE_DEEPSEEKOCR2:
+            // DSOCR encodes a whole same-size tile grid as one true batch
+            return ctx->model.hparams.preproc_max_tiles;
         default:
             return 1;
     }
