@@ -978,11 +978,14 @@ static std::unique_ptr<clip_graph> clip_get_graph_builder(clip_ctx * ctx, const 
             } break;
         case PROJECTOR_TYPE_DEEPSEEKOCR:
             {
-                builder = std::make_unique<clip_graph_deepseekocr>(ctx, img);
+                // same builder for the single global view (grid 1x1) and the batched tile grid
+                builder = std::make_unique<clip_graph_deepseekocr>(ctx, img,
+                    imgs.grid_x > 0 ? imgs.grid_x : 1, imgs.grid_y > 0 ? imgs.grid_y : 1);
             } break;
         case PROJECTOR_TYPE_DEEPSEEKOCR2:
              {
-                builder = std::make_unique<clip_graph_deepseekocr2>(ctx, img);
+                builder = std::make_unique<clip_graph_deepseekocr2>(ctx, img,
+                    imgs.grid_x > 0 ? imgs.grid_x : 1, imgs.grid_y > 0 ? imgs.grid_y : 1);
             } break;
         case PROJECTOR_TYPE_LFM2A:
             {
@@ -2856,9 +2859,41 @@ struct clip_model_loader {
         ctx_clip.support_batch = builder->support_batch();
     }
 
+    // DeepSeek-OCR (v1+v2) encodes a whole same-size tile grid as one batch.
+    // Reserve the worst-case grid (1 x max_tiles) up front so the first
+    // multi-tile encode does not need to re-allocate the compute buffers.
+    static void reserve_dsocr_max_tiles(clip_ctx & ctx_clip) {
+        const auto proj = ctx_clip.proj_type();
+        if (proj != PROJECTOR_TYPE_DEEPSEEKOCR && proj != PROJECTOR_TYPE_DEEPSEEKOCR2) {
+            return;
+        }
+        const auto & hparams   = ctx_clip.model.hparams;
+        const int    max_tiles = hparams.preproc_max_tiles;
+        const int    tile_size = hparams.preproc_tile_size;
+        if (max_tiles <= 1 || tile_size <= 0) {
+            return;
+        }
+
+        clip_image_f32_batch tiles;
+        for (int i = 0; i < max_tiles; i++) {
+            clip_image_f32_ptr tile(clip_image_f32_init());
+            tile->set_size({tile_size, tile_size}, /*is_placeholder=*/true, /*is_audio=*/false);
+            tiles.entries.push_back(std::move(tile));
+        }
+        tiles.grid_x = 1;          // one tile per row is the worst case for the woven newline count
+        tiles.grid_y = max_tiles;
+
+        LOG_INF("%s: reserving worst-case tile batch: %d tiles (1x%d grid) @ %dx%d\n",
+                __func__, max_tiles, max_tiles, tile_size, tile_size);
+        reserve_compute_meta(ctx_clip, tiles);
+    }
+
     static void warmup(clip_ctx & ctx_clip) {
         auto batch = get_dummy_batch(ctx_clip);
         warmup(ctx_clip, batch);
+
+        // reserve the worst-case DeepSeek-OCR tile batch (no-op for other models)
+        reserve_dsocr_max_tiles(ctx_clip);
     }
 
     static void warmup(clip_ctx & ctx_clip, const clip_image_f32_batch & batch) {
@@ -3191,16 +3226,6 @@ clip_image_f32 * clip_image_f32_get_img(const struct clip_image_f32_batch * batc
     return batch->entries[idx].get();
 }
 
-std::vector<float> clip_get_newline_embd(const struct clip_ctx * ctx) {
-    const ggml_tensor * nl = ctx->model.image_newline;
-    if (nl == nullptr || nl->type != GGML_TYPE_F32) {
-        return {};
-    }
-    std::vector<float> out(ggml_nelements(nl));
-    ggml_backend_tensor_get(nl, out.data(), 0, ggml_nbytes(nl));
-    return out;
-}
-
 void clip_free(clip_ctx * ctx) {
     if (ctx == nullptr) {
         return;
@@ -3272,7 +3297,7 @@ int clip_n_output_tokens_y(const struct clip_ctx * ctx, struct clip_image_f32 * 
     return 1;
 }
 
-int clip_n_output_tokens(const struct clip_ctx * ctx, struct clip_image_f32 * img) {
+int clip_n_output_tokens(const struct clip_ctx * ctx, struct clip_image_f32 * img, int grid_x, int grid_y) {
     const auto & params = ctx->model.hparams;
 
     // for models with fixed size image, the input image is already pre-processed and resized to square
@@ -3448,15 +3473,19 @@ int clip_n_output_tokens(const struct clip_ctx * ctx, struct clip_image_f32 * im
             } break;
         case PROJECTOR_TYPE_DEEPSEEKOCR:
         {
-            // SAM encoder applies two stride-2 convolutions (net_2 and net_3)
-            // that reduce spatial dimensions by 4x in each direction (16x total)
-            // E.g., 64x64 -> 16x16 patches
-            n_patches /= 16;
-
-            if (img->add_viewsep) {
-                // global view: one image-newline per token-row + trailing view separator
-                const int h = static_cast<int>(std::sqrt(static_cast<float>(n_patches)));
-                n_patches = h * (h + 1) + 1;
+            // SAM reduces spatial dimensions 4x in each direction (two stride-2 convs)
+            const int nx_tok = (img->nx() / patch_size) / 4;
+            const int ny_tok = (img->ny() / patch_size) / 4;
+            // the global view is always encoded single-image, never as a tile grid
+            GGML_ASSERT(!(img->add_viewsep && (grid_x > 1 || grid_y > 1)));
+            if (grid_x > 1 || grid_y > 1) {
+                // local tiles woven onto the grid: one image-newline at the end of every row
+                n_patches = (nx_tok * grid_x + 1) * (ny_tok * grid_y);
+            } else if (img->add_viewsep) {
+                // global view: one image-newline per row + trailing view separator
+                n_patches = ny_tok * (nx_tok + 1) + 1;
+            } else {
+                n_patches = nx_tok * ny_tok;
             }
         } break;
         case PROJECTOR_TYPE_HUNYUANVL:
@@ -3470,8 +3499,12 @@ int clip_n_output_tokens(const struct clip_ctx * ctx, struct clip_image_f32 * im
         {
             // 1024 global view -> 256 query tokens + 1 view separator = 257;
             // 768 local tile   -> 144 query tokens, no separator.
-            n_patches /= 16;
-            if (img->add_viewsep) {
+            n_patches /= 16; // query tokens per view (144 or 256)
+            // the global view is always encoded single-image, never as a tile grid
+            GGML_ASSERT(!(img->add_viewsep && (grid_x > 1 || grid_y > 1)));
+            if (grid_x > 1 || grid_y > 1) {
+                n_patches *= grid_x * grid_y; // tiles' query tokens are simply concatenated
+            } else if (img->add_viewsep) {
                 n_patches += 1; // view separator, appended only after the global view
             }
         } break;
@@ -4455,7 +4488,7 @@ bool clip_image_batch_encode(clip_ctx * ctx, const int n_threads, const clip_ima
 
     // sanity check (assuming that all images in batch have the same number of tokens, so we only check the first one)
     const int n_tokens_out = embeddings->ne[1];
-    const int expected_n_tokens_out = clip_n_output_tokens(ctx, imgs.entries[0].get());
+    const int expected_n_tokens_out = clip_n_output_tokens(ctx, imgs.entries[0].get(), imgs.grid_x, imgs.grid_y);
     if (n_tokens_out != expected_n_tokens_out) {
         LOG_ERR("%s: expected output %d tokens, got %d\n", __func__, expected_n_tokens_out, n_tokens_out);
         GGML_ABORT("Invalid number of output tokens");

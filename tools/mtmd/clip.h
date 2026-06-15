@@ -70,7 +70,8 @@ int32_t clip_get_hidden_size(const struct clip_ctx * ctx);
 // TODO: should be enum, not string
 const char * clip_patch_merge_type(const struct clip_ctx * ctx);
 
-int clip_n_output_tokens(const struct clip_ctx * ctx, struct clip_image_f32 * img);
+// grid_x/grid_y of the tile grid; leave at 1 for a single image
+int clip_n_output_tokens(const struct clip_ctx * ctx, struct clip_image_f32 * img, int grid_x = 1, int grid_y = 1);
 
 // for M-RoPE, this will be the number of token positions in X and Y directions
 // for other models, X will be the total number of tokens and Y will be 1
@@ -96,9 +97,6 @@ size_t clip_image_f32_batch_n_images(const struct clip_image_f32_batch * batch);
 size_t clip_image_f32_batch_nx(const struct clip_image_f32_batch * batch, int idx); // equivalent to batch[idx]->nx
 size_t clip_image_f32_batch_ny(const struct clip_image_f32_batch * batch, int idx); // equivalent to batch[idx]->ny
 struct clip_image_f32 * clip_image_f32_get_img(const struct clip_image_f32_batch * batch, int idx); // equivalent to batch[idx]->data
-
-// read the image-newline embedding from the backend; empty if the model has none
-std::vector<float> clip_get_newline_embd(const struct clip_ctx * ctx);
 
 bool clip_image_encode      (struct clip_ctx * ctx, int n_threads, struct clip_image_f32 * img, std::vector<float> & out_vec);
 bool clip_image_batch_encode(struct clip_ctx * ctx, int n_threads, const struct clip_image_f32_batch * imgs, std::vector<float> & out_batch_embd);

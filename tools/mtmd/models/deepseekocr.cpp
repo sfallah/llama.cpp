@@ -248,18 +248,21 @@ ggml_tensor * clip_graph_deepseekocr::build_sam(ggml_tensor * inp_raw) {
 }
 
 ggml_cgraph * clip_graph_deepseekocr::build() {
-    // patch embedding
-    ggml_tensor * inp_raw = build_inp_raw();
+
+    ggml_tensor * inp_raw = build_inp_raw(3);
+    const int64_t B       = inp_raw->ne[3];
+
+    // sam_out: [tile_w, tile_w, n_sam_embd, B]
     ggml_tensor * sam_out = build_sam(inp_raw);
 
-    const int clip_n_patches = sam_out->ne[0] * sam_out->ne[1];
+    const int tile_w         = sam_out->ne[0]; // SAM patch grid is square (ne[0] == ne[1])
+    const int clip_n_patches = tile_w * sam_out->ne[1];
 
     ggml_tensor * clip_out;
     // Building DS-OCR CLIP
     {
-        ggml_tensor * inp;
-
-        inp = ggml_reshape_2d(ctx0, sam_out, clip_n_patches, sam_out->ne[2]);
+        // [tile_w, tile_w, n_embd, B] -> [n_patches, n_embd, B] -> [n_embd, n_patches, B]
+        ggml_tensor * inp = ggml_reshape_3d(ctx0, sam_out, clip_n_patches, sam_out->ne[2], B);
         inp = ggml_cont(ctx0, ggml_permute(ctx0, inp, 1, 0, 2, 3));
 
         ggml_tensor * new_pos_embd = model.position_embeddings;
@@ -283,38 +286,44 @@ ggml_cgraph * clip_graph_deepseekocr::build() {
             n_pos        = tgt_size * tgt_size + 1;
         }
 
-        // add CLS token
-        inp = ggml_concat(ctx0, model.class_embedding, inp, 1);
+        // CLS token, broadcast across the batch
+        ggml_tensor * cls_b = ggml_repeat_4d(ctx0, model.class_embedding, n_embd, 1, B, 1);
+        inp = ggml_concat(ctx0, cls_b, inp, 1); // [n_embd, n_pos, B]
 
         // for selecting learned pos embd, used by ViT
         ggml_tensor * positions        = ggml_cast(ctx0, ggml_arange(ctx0, 0, n_pos, 1), GGML_TYPE_I32);
         ggml_tensor * learned_pos_embd = ggml_get_rows(ctx0, new_pos_embd, positions);
 
-        ggml_tensor * cur = build_vit(inp, n_pos, NORM_TYPE_NORMAL, FFN_GELU_QUICK, learned_pos_embd, nullptr);
+        clip_out = build_vit(inp, n_pos, NORM_TYPE_NORMAL, FFN_GELU_QUICK, learned_pos_embd, nullptr); // [n_embd, n_pos, B]
 
-        ggml_build_forward_expand(gf, cur);
-        clip_out = cur;
+        ggml_build_forward_expand(gf, clip_out);
     }
 
     sam_out  = ggml_cont(ctx0, ggml_permute(ctx0, sam_out, 1, 2, 0, 3));
-    sam_out  = ggml_reshape_2d(ctx0, sam_out, sam_out->ne[0], clip_n_patches);
-    clip_out = ggml_view_2d(ctx0, clip_out, n_embd, clip_n_patches, clip_out->nb[1], clip_out->nb[1]);
+    sam_out  = ggml_reshape_3d(ctx0, sam_out, sam_out->ne[0], clip_n_patches, B);
+    clip_out = ggml_view_3d(ctx0, clip_out, n_embd, clip_n_patches, B,
+                            clip_out->nb[1], clip_out->nb[2], clip_out->nb[1]);
 
     ggml_tensor * cur;
     cur = ggml_concat(ctx0, clip_out, sam_out, 0);
     cur = ggml_mul_mat(ctx0, model.mm_fc_w, cur);
     cur = ggml_add(ctx0, cur, model.mm_fc_b);
 
-    // global view: weave one newline per row + trailing view separator
-    if (img.add_viewsep) {
-        const auto h     = static_cast<int>(std::sqrt(static_cast<float>(cur->ne[1])));
-        const auto w     = h;
-        const auto n_dim = cur->ne[0];
+    const int gw    = tile_w * grid_x;
+    const int gh    = tile_w * grid_y;
+    const int n_dim = cur->ne[0];
 
-        ggml_tensor * imgnl = ggml_repeat_4d(ctx0, model.image_newline, n_dim, 1, h, 1);
-        cur = ggml_reshape_3d(ctx0, cur, n_dim, w, h);
-        cur = ggml_reshape_2d(ctx0, ggml_concat(ctx0, cur, imgnl, 1), n_dim, (w + 1) * h);
-        cur = ggml_concat(ctx0, cur, model.view_seperator, 1);  // (n_dim, h*(w+1) + 1)
+    cur = ggml_reshape_4d(ctx0, cur, n_dim * tile_w, tile_w, grid_x, grid_y); // [n_dim*tile_w, tile_w, grid_x, grid_y]
+    cur = ggml_cont(ctx0, ggml_permute(ctx0, cur, 0, 2, 1, 3));
+
+    ggml_tensor * nl = ggml_repeat_4d(ctx0, model.image_newline, n_dim, 1, gh, 1);
+    cur = ggml_reshape_3d(ctx0, cur, n_dim, gw, gh); // [n_dim, gw, gh]
+    cur = ggml_concat(ctx0, cur, nl, 1);
+    cur = ggml_reshape_2d(ctx0, cur, n_dim, (gw + 1) * gh);
+
+    // view separator only after the single global view (grid 1x1)
+    if (img.add_viewsep) {
+        cur = ggml_concat(ctx0, cur, model.view_seperator, 1); // (n_dim, (gw+1)*gh + 1)
     }
 
     cb(cur, "dsocr_output", -1);
