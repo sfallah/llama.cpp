@@ -100,6 +100,25 @@ CASES = [
         # 2 local 768 tiles + 1 global 1024 view = 545 image tokens.
         hf_cer=0.0236, hf_chrf=97.05, cer_tol=0.03, chrf_tol=3.0,
     ),
+    TestCase(
+        model_key="v1", label="multi-column grid (2x3)",
+        image="tools/mtmd/tests/test-multi-grid.jpg",
+        ground_truth="tools/mtmd/tests/test-multi-grid-ground-truth.txt",
+        # 762x1000 -> aspect 0.762 picks the (2,3) grid = 6 local 640 tiles +
+        # 1 global 1024 view. grid_x=2 is the point: it exercises the
+        # cross-tile sub-row interleave that the (1,2)/grid_x=1 case cannot --
+        # a weave that only handles a single tile column craters here.
+        # HF ref: DeepSeek-OCR (custom code, MPS fp16) on this image + GT.
+        hf_cer=0.0584, hf_chrf=93.57, cer_tol=0.03, chrf_tol=3.0,
+    ),
+    TestCase(
+        model_key="v2", label="multi-column grid (2x3)",
+        image="tools/mtmd/tests/test-multi-grid.jpg",
+        ground_truth="tools/mtmd/tests/test-multi-grid-ground-truth.txt",
+        # 762x1000 -> (2,3) grid = 6 local 768 tiles + 1 global 1024 view.
+        # HF ref: DeepSeek-OCR-2 (native transformers, bf16) on this image + GT.
+        hf_cer=0.0211, hf_chrf=98.02, cer_tol=0.03, chrf_tol=3.0,
+    ),
 ]
 
 
