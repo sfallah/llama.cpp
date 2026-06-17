@@ -3297,7 +3297,7 @@ int clip_n_output_tokens_y(const struct clip_ctx * ctx, struct clip_image_f32 * 
     return 1;
 }
 
-int clip_n_output_tokens(const struct clip_ctx * ctx, struct clip_image_f32 * img, int grid_x, int grid_y) {
+int clip_n_output_tokens(const struct clip_ctx * ctx, struct clip_image_f32 * img) {
     const auto & params = ctx->model.hparams;
 
     // for models with fixed size image, the input image is already pre-processed and resized to square
@@ -3476,15 +3476,11 @@ int clip_n_output_tokens(const struct clip_ctx * ctx, struct clip_image_f32 * im
             // SAM reduces spatial dimensions 4x in each direction (two stride-2 convs)
             const int nx_tok = (img->nx() / patch_size) / 4;
             const int ny_tok = (img->ny() / patch_size) / 4;
-            // the global view is always encoded single-image, never as a tile grid
-            GGML_ASSERT(!(img->add_viewsep && (grid_x > 1 || grid_y > 1)));
-            if (grid_x > 1 || grid_y > 1) {
-                // local tiles woven onto the grid: one image-newline at the end of every row
-                n_patches = (nx_tok * grid_x + 1) * (ny_tok * grid_y);
-            } else if (img->add_viewsep) {
+            if (img->add_viewsep) {
                 // global view: one image-newline per row + trailing view separator
                 n_patches = ny_tok * (nx_tok + 1) + 1;
             } else {
+                // single local tile; multi-tile grid weaving is counted in mtmd
                 n_patches = nx_tok * ny_tok;
             }
         } break;
@@ -3500,11 +3496,7 @@ int clip_n_output_tokens(const struct clip_ctx * ctx, struct clip_image_f32 * im
             // 1024 global view -> 256 query tokens + 1 view separator = 257;
             // 768 local tile   -> 144 query tokens, no separator.
             n_patches /= 16; // query tokens per view (144 or 256)
-            // the global view is always encoded single-image, never as a tile grid
-            GGML_ASSERT(!(img->add_viewsep && (grid_x > 1 || grid_y > 1)));
-            if (grid_x > 1 || grid_y > 1) {
-                n_patches *= grid_x * grid_y; // tiles' query tokens are simply concatenated
-            } else if (img->add_viewsep) {
+            if (img->add_viewsep) {
                 n_patches += 1; // view separator, appended only after the global view
             }
         } break;
@@ -4486,12 +4478,17 @@ bool clip_image_batch_encode(clip_ctx * ctx, const int n_threads, const clip_ima
     // the last node is the embedding tensor
     ggml_tensor * embeddings = ggml_graph_node(gf, -1);
 
-    // sanity check (assuming that all images in batch have the same number of tokens, so we only check the first one)
+    // sanity check: the per-image token count only applies when the graph keeps each image as a
+    // separate batch slice (ne[2] == n_batch). Models that fuse the batch into one woven sequence
+    // (e.g. DeepSeek-OCR tile grids) collapse ne[2] to 1 and are validated by the output-buffer-size
+    // check below instead.
     const int n_tokens_out = embeddings->ne[1];
-    const int expected_n_tokens_out = clip_n_output_tokens(ctx, imgs.entries[0].get(), imgs.grid_x, imgs.grid_y);
-    if (n_tokens_out != expected_n_tokens_out) {
-        LOG_ERR("%s: expected output %d tokens, got %d\n", __func__, expected_n_tokens_out, n_tokens_out);
-        GGML_ABORT("Invalid number of output tokens");
+    if (embeddings->ne[2] == n_batch_cur) {
+        const int expected_n_tokens_out = clip_n_output_tokens(ctx, imgs.entries[0].get());
+        if (n_tokens_out != expected_n_tokens_out) {
+            LOG_ERR("%s: expected output %d tokens, got %d\n", __func__, expected_n_tokens_out, n_tokens_out);
+            GGML_ABORT("Invalid number of output tokens");
+        }
     }
 
     LOG_DBG("%s: output embedding shape [%d, %d, %d]\n", __func__,

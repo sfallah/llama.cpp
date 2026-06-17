@@ -799,6 +799,19 @@ void mtmd_free(mtmd_context * ctx) {
     delete ctx;
 }
 
+// DeepSeek-OCR multi-tile token count (the tile grid is woven into one sequence). Kept here in mtmd
+// rather than in the shared clip_n_output_tokens so the clip API stays per-image. v1 weaves one
+// image-newline at the end of every row across the full grid width (grid_x*h + 1 wide, grid_y*h rows);
+// v2 simply concatenates the per-tile query tokens.
+static size_t dsocr_tile_grid_tokens(clip_ctx * ctx_clip, clip_image_f32 * tile0,
+                                     int grid_x, int grid_y, projector_type proj) {
+    if (proj == PROJECTOR_TYPE_DEEPSEEKOCR) {
+        const int h = clip_n_output_tokens_x(ctx_clip, tile0); // square per-tile side (in tokens)
+        return (size_t)(h * grid_x + 1) * (size_t)(h * grid_y);
+    }
+    return (size_t) clip_n_output_tokens(ctx_clip, tile0) * (size_t)(grid_x * grid_y);
+}
+
 struct mtmd_tokenizer {
     mtmd_context * ctx;
 
@@ -1169,8 +1182,8 @@ struct mtmd_tokenizer {
                 if ((ctx->proj_type_v() == PROJECTOR_TYPE_DEEPSEEKOCR || ctx->proj_type_v() == PROJECTOR_TYPE_DEEPSEEKOCR2)
                         && batch_f32.entries.size() > 1) {
                     // the tiles are encoded as one batched grid, then the global view is appended
-                    n_tokens  = clip_n_output_tokens(ctx->ctx_v, batch_f32.entries[0].get(),
-                                                     batch_f32.grid_x, batch_f32.grid_y);
+                    n_tokens  = dsocr_tile_grid_tokens(ctx->ctx_v, batch_f32.entries[0].get(),
+                                                       batch_f32.grid_x, batch_f32.grid_y, ctx->proj_type_v());
                     n_tokens += clip_n_output_tokens(ctx->ctx_v, batch_f32.entries.back().get());
                 } else {
                     for (const auto & e : batch_f32.entries) {
@@ -1424,8 +1437,8 @@ static int32_t encode_deepseekocr(mtmd_context * ctx, const clip_image_f32_batch
     size_t offset = 0;
     if (n_tiles > 0) {
         GGML_ASSERT(n_tiles == batch.grid_x * batch.grid_y);
-        const size_t tiles_n = static_cast<size_t>(
-            clip_n_output_tokens(ctx_clip, entries[0].get(), batch.grid_x, batch.grid_y));
+        const size_t tiles_n = dsocr_tile_grid_tokens(
+            ctx_clip, entries[0].get(), batch.grid_x, batch.grid_y, clip_get_projector_type(ctx_clip));
         std::vector<float> tiles_embd(tiles_n * n_embd_out);
 
         // borrow the tile entries into a sub-batch; release them before it is destroyed
