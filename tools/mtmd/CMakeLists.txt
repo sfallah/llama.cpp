@@ -122,7 +122,7 @@ add_executable(llama-minicpmv-cli deprecation-warning.cpp)
 add_executable(llama-qwen2vl-cli  deprecation-warning.cpp)
 
 set(TARGET llama-mtmd-cli)
-add_executable         (${TARGET} mtmd-cli.cpp)
+add_executable         (${TARGET} mtmd-cli.cpp grounding.cpp)
 set_target_properties  (${TARGET} PROPERTIES OUTPUT_NAME llama-mtmd-cli)
 if(LLAMA_TOOLS_INSTALL)
     install(TARGETS ${TARGET} RUNTIME)
