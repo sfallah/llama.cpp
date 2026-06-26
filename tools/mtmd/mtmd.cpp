@@ -999,6 +999,26 @@ struct mtmd_tokenizer {
             return 1;
         }
 
+        // DEBUG: dump the final chunk/token sequence when DSOCR_DEBUG_DIR is set
+        if (const char * dbg = std::getenv("DSOCR_DEBUG_DIR")) {
+            FILE * tf = fopen((std::string(dbg) + "/tokens.txt").c_str(), "w");
+            if (tf) {
+                for (size_t ci = 0; ci < cur.entries.size(); ++ci) {
+                    auto & e = cur.entries[ci];
+                    if (e.type == MTMD_INPUT_CHUNK_TYPE_TEXT) {
+                        fprintf(tf, "TEXT[%zu] n=%zu:", ci, e.tokens_text.size());
+                        for (auto t : e.tokens_text) fprintf(tf, " %d", (int) t);
+                        fprintf(tf, "\n");
+                    } else if (e.type == MTMD_INPUT_CHUNK_TYPE_IMAGE) {
+                        fprintf(tf, "IMAGE[%zu]\n", ci);
+                    } else {
+                        fprintf(tf, "OTHER[%zu] type=%d\n", ci, (int) e.type);
+                    }
+                }
+                fclose(tf);
+            }
+        }
+
         *output = std::move(cur);
 
         return 0;
