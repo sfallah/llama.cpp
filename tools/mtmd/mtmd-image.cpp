@@ -1,7 +1,9 @@
 #include "mtmd-image.h"
+#include "dsocr-debug.h"  // DEBUG: throwaway preprocessing-dump instrumentation
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <vector>
 
 void mtmd_image_preproc_out::append(const clip_hparams & hparams, const clip_image_u8 & img, bool normalized) {
@@ -1220,6 +1222,34 @@ mtmd_image_preproc_out mtmd_image_preprocessor_deepseekocr::preprocess(const cli
 
     output.grid_x = grid_w;
     output.grid_y = grid_h;
+
+    // DEBUG: dump preprocessing output (normalized pixels) when DSOCR_DEBUG_DIR is set
+    if (const char * dbg = std::getenv("DSOCR_DEBUG_DIR")) {
+        const std::string dir = dbg;
+        auto dump_img = [&](const std::string & name, const clip_image_f32 & im) {
+            if (im.is_placeholder()) return;
+            const auto & b = im.get_ro_buf();
+            dsocr_debug_write_npy(dir + "/" + name + ".npy", b.data(),
+                                  { (int64_t) im.ny(), (int64_t) im.nx(), 3 });
+            fprintf(stderr, "[dsocr-debug] dumped %-17s shape=[%d,%d,3] -> %s/%s.npy\n",
+                    name.c_str(), im.ny(), im.nx(), dir.c_str(), name.c_str());
+        };
+        dump_img("preproc_overview", output.overview);
+        for (size_t i = 0; i < output.entries.size(); ++i) {
+            dump_img("preproc_entry_" + std::to_string(i), output.entries[i]);
+        }
+        FILE * meta = fopen((dir + "/preproc_meta.txt").c_str(), "w");
+        if (meta) {
+            fprintf(meta, "grid_x %d\ngrid_y %d\nn_entries %zu\noverview %dx%d\n",
+                    output.grid_x, output.grid_y, output.entries.size(),
+                    output.overview.nx(), output.overview.ny());
+            for (size_t i = 0; i < output.entries.size(); ++i) {
+                fprintf(meta, "entry_%zu %dx%d\n", i, output.entries[i].nx(), output.entries[i].ny());
+            }
+            fclose(meta);
+        }
+    }
+
     return output;
 }
 

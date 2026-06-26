@@ -2,6 +2,7 @@
 #include "clip-impl.h"
 #include "clip-model.h"
 #include "clip-graph.h"
+#include "dsocr-debug.h"  // DEBUG: throwaway tensor-dump instrumentation
 #include "models/models.h"
 
 #include "ggml.h"
@@ -4436,10 +4437,20 @@ bool clip_image_batch_encode(clip_ctx * ctx, int n_threads, const clip_image_f32
         }
     }
 
+    // DEBUG: dump named encoder-stage tensors (sam_output/clip_out/dsocr_output) when DSOCR_DEBUG_DIR is set
+    const char * dsocr_dbg_dir = std::getenv("DSOCR_DEBUG_DIR");
+    if (dsocr_dbg_dir) {
+        ggml_backend_sched_set_eval_callback(ctx->sched.get(), dsocr_debug_eval_cb, (void *) dsocr_dbg_dir);
+    }
+
     auto status = ggml_backend_sched_graph_compute(ctx->sched.get(), gf);
     if (status != GGML_STATUS_SUCCESS) {
         LOG_ERR("%s: ggml_backend_sched_graph_compute failed with error %d\n", __func__, status);
         return false;
+    }
+
+    if (dsocr_dbg_dir) {
+        ggml_backend_sched_set_eval_callback(ctx->sched.get(), nullptr, nullptr);
     }
 
     // the last node is the embedding tensor

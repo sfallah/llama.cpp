@@ -331,6 +331,7 @@ ggml_cgraph * clip_graph_deepseekocr::build() {
 
         ggml_tensor * cur = build_vit(inp, n_pos, NORM_TYPE_NORMAL, FFN_GELU_QUICK, learned_pos_embd, nullptr);
 
+        cb(cur, "clip_out", -1);  // DEBUG: name the ViT output so the eval-callback can dump it
         ggml_build_forward_expand(gf, cur);
         clip_out = cur;
     }
