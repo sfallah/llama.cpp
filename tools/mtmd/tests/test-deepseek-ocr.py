@@ -29,12 +29,15 @@ class ModelSpec:
     mmproj_arg: str
     model_default: str
     mmproj_default: str
-    prompt: str = "Free OCR. "
+    prompt: str = "Free OCR."
     n_predict: int = 512
     n_ctx: int | None = None
     # Unlimited-OCR's "document parsing" prompt emits <|det|> grounding markup that
     # the HF reference strips in result.md; drop it before scoring to match.
     strip_grounding: bool = False
+    # v2/Unlimited loop on hard tiles; DRY caps it the way HF's
+    # no_repeat_ngram_size does. v1 scores fine without it.
+    dry: bool = False
 
 
 @dataclass
@@ -47,6 +50,8 @@ class TestCase:
     hf_chrf: float
     cer_tol: float
     chrf_tol: float
+    # off matches the HF "eager" attention reference; set True for a case that needs it.
+    flash_attn: bool = False
 
     @property
     def cer_max(self) -> float:
@@ -69,6 +74,7 @@ MODELS = {
         model_arg="--llama-model-2", mmproj_arg="--mmproj-2",
         model_default="gguf_models/deepseek-ai/deepseek-ocr-2-bf16.gguf",
         mmproj_default="gguf_models/deepseek-ai/mmproj-deepseek-ocr-2-bf16.gguf",
+        dry=True,
     ),
     "unlimited": ModelSpec(
         key="unlimited", label="Unlimited-OCR",
@@ -83,6 +89,7 @@ MODELS = {
         n_predict=4096,
         n_ctx=16384,
         strip_grounding=True,
+        dry=True,
     ),
 }
 
@@ -185,7 +192,7 @@ def compute_chrf(expected: str, ocr_out: str) -> float:
     return CHRF().sentence_score(ocr_out, [expected]).score
 
 
-def run_mtmd_cli(spec: "ModelSpec", model_path, mmproj_path, image_path, bin_path) -> str:
+def run_mtmd_cli(spec: "ModelSpec", case: "TestCase", model_path, mmproj_path, image_path, bin_path) -> str:
     """Run mtmd-cli on the image and return its output."""
     cmd = [
         str(bin_path),
@@ -195,17 +202,20 @@ def run_mtmd_cli(spec: "ModelSpec", model_path, mmproj_path, image_path, bin_pat
         "-p", spec.prompt,
         "--chat-template", "deepseek-ocr",
         "--temp", "0",
-        "--flash-attn", "off",  # match the HF "eager" attention reference
+        "--flash-attn", "on" if case.flash_attn else "off",
         "--no-warmup",
         "-n", str(spec.n_predict),  # cap loops on hard images (KV would otherwise fill)
+    ]
+    if spec.dry:
         # HF decodes with no_repeat_ngram_size; llama.cpp's analog is DRY.
         # Default DRY breakers include "\n", so they are cleared below.
-        "--dry-multiplier", "0.8",
-        "--dry-base", "1.75",
-        "--dry-allowed-length", "2",
-        "--dry-penalty-last-n", "-1",
-        "--dry-sequence-breaker", "none",
-    ]
+        cmd += [
+            "--dry-multiplier", "0.8",
+            "--dry-base", "1.75",
+            "--dry-allowed-length", "2",
+            "--dry-penalty-last-n", "-1",
+            "--dry-sequence-breaker", "none",
+        ]
     if spec.n_ctx is not None:
         cmd += ["-c", str(spec.n_ctx)]
     logger.debug(f"  command: {' '.join(cmd)}")
@@ -331,7 +341,7 @@ def main() -> int:
         logger.info(f"  Expected text: {len(expected)} chars")
         logger.info(f"  Running llama.cpp prompt {model_spec.prompt!r}")
         try:
-            ocr_out = run_mtmd_cli(model_spec, model, mmproj, image, binary)
+            ocr_out = run_mtmd_cli(model_spec, case, model, mmproj, image, binary)
         except RuntimeError as e:
             logger.error(f"  Error: {e}")
             results[title] = False
