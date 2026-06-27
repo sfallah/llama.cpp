@@ -89,6 +89,12 @@ static ggml_tensor * get_rel_pos(ggml_context * ctx0,
 }
 
 
+ggml_tensor * clip_graph_deepseekocr::build_mm(ggml_tensor * w, ggml_tensor * x) const {
+    ggml_tensor * cur = ggml_mul_mat(ctx0, w, x);
+    ggml_mul_mat_set_prec(cur, GGML_PREC_F32);  // bf16 vision GEMMs otherwise truncate
+    return cur;
+}
+
 ggml_tensor * clip_graph_deepseekocr::build_sam(ggml_tensor * inp_raw) {
     // Building SAM
     const int n_embd  = hparams.sam_n_embd;

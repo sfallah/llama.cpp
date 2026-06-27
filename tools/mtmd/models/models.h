@@ -127,6 +127,7 @@ struct clip_graph_deepseekocr : clip_graph {
     clip_graph_deepseekocr(clip_ctx * ctx, const clip_image_f32 & img) : clip_graph(ctx, img) {}
     ggml_cgraph * build() override;
     ggml_tensor * build_sam(ggml_tensor * inp); // build the SAM model
+    ggml_tensor * build_mm(ggml_tensor * w, ggml_tensor * x) const override; // force F32 GEMM accum (bf16 vision)
     // bool support_batch() const override { return true; } // TODO: support batch for DeepSeek-OCR v1
 };
 
