@@ -52,8 +52,6 @@ class TestCase:
     chrf_tol: float
     # off matches the HF "eager" attention reference; set True for a case that needs it.
     flash_attn: bool = False
-    # override the model's default -n for cases that need more room (multi-tile grids).
-    n_predict: int | None = None
 
     @property
     def cer_max(self) -> float:
@@ -76,6 +74,8 @@ MODELS = {
         model_arg="--llama-model-2", mmproj_arg="--mmproj-2",
         model_default="gguf_models/deepseek-ai/deepseek-ocr-2-bf16.gguf",
         mmproj_default="gguf_models/deepseek-ai/mmproj-deepseek-ocr-2-bf16.gguf",
+        # v2 keeps generating past 512 on multi-tile; give it room to match the HF ref.
+        n_predict=2048,
         dry=True,
     ),
     "unlimited": ModelSpec(
@@ -144,7 +144,6 @@ CASES = [
         # a weave that only handles a single tile column craters here.
         # HF ref: DeepSeek-OCR (custom code, MPS fp16) on this image + GT.
         hf_cer=0.0584, hf_chrf=93.57, cer_tol=0.03, chrf_tol=3.0,
-        n_predict=1024,
     ),
     TestCase(
         model_key="v2", label="multi-column grid (2x3)",
@@ -230,7 +229,7 @@ def run_mtmd_cli(spec: "ModelSpec", case: "TestCase", model_path, mmproj_path, i
         "--temp", "0",
         "--flash-attn", "on" if case.flash_attn else "off",
         "--no-warmup",
-        "-n", str(case.n_predict or spec.n_predict),  # cap loops on hard images (KV would otherwise fill)
+        "-n", str(spec.n_predict),  # cap loops on hard images (KV would otherwise fill)
     ]
     if spec.dry:
         # HF decodes with no_repeat_ngram_size; llama.cpp's analog is DRY.
