@@ -52,6 +52,8 @@ class TestCase:
     chrf_tol: float
     # off matches the HF "eager" attention reference; set True for a case that needs it.
     flash_attn: bool = False
+    # override the model's default -n for cases that need more room (multi-tile grids).
+    n_predict: int | None = None
 
     @property
     def cer_max(self) -> float:
@@ -129,6 +131,26 @@ CASES = [
         hf_cer=0.0236, hf_chrf=97.05, cer_tol=0.03, chrf_tol=3.0,
     ),
     TestCase(
+        model_key="v1", label="multi-column grid (2x3)",
+        image="tools/mtmd/tests/test-multi-grid.jpg",
+        ground_truth="tools/mtmd/tests/test-multi-grid-ground-truth.txt",
+        # 762x1000 -> aspect 0.762 picks the (2,3) grid = 6 local 640 tiles +
+        # 1 global 1024 view. grid_x=2 is the point: it exercises the
+        # cross-tile sub-row interleave that the (1,2)/grid_x=1 case cannot --
+        # a weave that only handles a single tile column craters here.
+        # HF ref: DeepSeek-OCR (custom code, MPS fp16) on this image + GT.
+        hf_cer=0.0584, hf_chrf=93.57, cer_tol=0.03, chrf_tol=3.0,
+        n_predict=1024,
+    ),
+    TestCase(
+        model_key="v2", label="multi-column grid (2x3)",
+        image="tools/mtmd/tests/test-multi-grid.jpg",
+        ground_truth="tools/mtmd/tests/test-multi-grid-ground-truth.txt",
+        # 762x1000 -> (2,3) grid = 6 local 768 tiles + 1 global 1024 view.
+        # HF ref: DeepSeek-OCR-2 (native transformers, bf16) on this image + GT.
+        hf_cer=0.0211, hf_chrf=98.02, cer_tol=0.03, chrf_tol=3.0,
+    ),
+    TestCase(
         model_key="unlimited", label="single-view scan",
         image="tools/mtmd/test-1.jpeg",
         ground_truth="tools/mtmd/tests/test-1-ground-truth.txt",
@@ -204,7 +226,7 @@ def run_mtmd_cli(spec: "ModelSpec", case: "TestCase", model_path, mmproj_path, i
         "--temp", "0",
         "--flash-attn", "on" if case.flash_attn else "off",
         "--no-warmup",
-        "-n", str(spec.n_predict),  # cap loops on hard images (KV would otherwise fill)
+        "-n", str(case.n_predict or spec.n_predict),  # cap loops on hard images (KV would otherwise fill)
     ]
     if spec.dry:
         # HF decodes with no_repeat_ngram_size; llama.cpp's analog is DRY.
