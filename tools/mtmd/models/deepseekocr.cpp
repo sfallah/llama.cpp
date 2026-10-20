@@ -174,7 +174,7 @@ ggml_tensor * clip_graph_deepseekocr::build_sam(ggml_tensor * inp_raw) {
         {
             const int B = cur->ne[3];
 
-            cur = ggml_mul_mat(ctx0, layer.qkv_w, cur);
+            cur = ggml_mul_mat(ctx0, layer.qkv_w, ggml_reshape_3d(ctx0, cur, n_embd, W * H, B));
             cur = ggml_add(ctx0, cur, layer.qkv_b);
             cur = ggml_reshape_4d(ctx0, cur, n_embd, 3, W * H, B);
 
