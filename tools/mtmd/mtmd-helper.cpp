@@ -228,6 +228,7 @@ int32_t mtmd_helper_eval_chunk_single(mtmd_context * ctx,
                 GGML_ASSERT(idx >= 0);
                 llama_pos pos = n_past++;
                 llama_batch_ext_set_pos(text_batch.get(), idx, &pos);
+                llama_batch_ext_set_prompt(text_batch.get(), idx, true);
                 n_added++;
             }
             bool is_last_token = (i == n_tokens);

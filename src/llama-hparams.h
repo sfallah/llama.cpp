@@ -530,7 +530,7 @@ struct llama_hparams {
     // note: inlined on purpose for performance reasons
     // TODO: think of a better place for this function
     // TODO: pack the SWA params in a struct?
-    // n_ref = R-SWA prefix length L_m (always-visible positions); < 0 = unlatched, full causal
+    // n_ref = R-SWA prompt length L_m (always-visible positions); < 0 = no prompt yet, full causal
     static bool is_masked_swa(uint32_t n_swa, llama_swa_type swa_type, llama_pos p0, llama_pos p1, llama_pos n_ref = -1) {
         assert(p0 >= 0 && p1 >= 0);
 

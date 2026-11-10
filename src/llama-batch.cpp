@@ -222,6 +222,12 @@ bool llama_batch_allocr::init(
             decision_order[i] = batch_inp.tokens[i].decision_order;
         }
     }
+    for (int32_t i = 0; i < n_tok; ++i) {
+        if (batch_inp.tokens[i].prompt) {
+            prompt.resize(n_tok, 0);
+            prompt[i] = 1;
+        }
+    }
 
     //
     // set up the internal llama_batch to point to our owned arrays
@@ -314,6 +320,7 @@ bool llama_batch_allocr::init(
             /*.output       =*/ batch.logits,
             /*.type         =*/ is_embd_vec.empty() ? nullptr : is_embd_vec.data(),
             /*.decision_order =*/ decision_order.empty() ? nullptr : decision_order.data(),
+            /*.prompt       =*/ prompt.empty() ? nullptr : prompt.data(),
             /*.data         =*/ {},
         };
 
@@ -539,6 +546,7 @@ llama_ubatch llama_batch_allocr::ubatch_reserve(uint32_t n_seq_tokens, uint32_t 
         /*.output       =*/ udata->output.data(),
         /*.type         =*/ nullptr,
         /*.decision_order =*/ nullptr,
+        /*.prompt       =*/ nullptr,
         /*.data         =*/ std::move(udata),
     };
 
@@ -845,6 +853,7 @@ void llama_batch_allocr::clear() {
     seq_id_unq  .clear();
     output      .clear();
     decision_order.clear();
+    prompt.clear();
 
     for (auto & cur : seq_pos) {
         cur.clear();
@@ -897,6 +906,7 @@ llama_ubatch llama_batch_allocr::ubatch_add(const std::vector<int32_t> & idxs, u
     udata->output    .resize(n_tokens);
     udata->type      .resize(mixed ? n_tokens : 0);
     udata->decision_order.resize(decision_order.empty() ? 0 : n_tokens);
+    udata->prompt.resize(prompt.empty() ? 0 : n_tokens);
 
     udata->batch_idxs = idxs;
     udata->seq_id_data.reserve(n_tokens);
@@ -929,6 +939,9 @@ llama_ubatch llama_batch_allocr::ubatch_add(const std::vector<int32_t> & idxs, u
 
         if (!decision_order.empty()) {
             udata->decision_order[i] = decision_order[idxs[i]];
+        }
+        if (!prompt.empty()) {
+            udata->prompt[i] = prompt[idxs[i]];
         }
 
         for (int s = 0; s < udata->n_seq_id[i]; ++s) {
@@ -975,6 +988,7 @@ llama_ubatch llama_batch_allocr::ubatch_add(const std::vector<int32_t> & idxs, u
         /*.output       =*/ udata->output.data(),
         /*.type         =*/ mixed ? udata->type.data() : nullptr,
         /*.decision_order =*/ udata->decision_order.empty() ? nullptr : udata->decision_order.data(),
+        /*.prompt       =*/ udata->prompt.empty() ? nullptr : udata->prompt.data(),
         /*.data         =*/ std::move(udata),
     };
 
@@ -1337,6 +1351,14 @@ bool llama_batch_ext::set_decision_order(int32_t idx, int32_t order) {
     return true;
 }
 
+bool llama_batch_ext::set_prompt(int32_t idx, bool value) {
+    if (idx < 0 || idx >= (int32_t) tokens.size()) {
+        return false;
+    }
+    tokens[idx].prompt = value;
+    return true;
+}
+
 // llama_batch_ext C API
 
 llama_batch_ext * llama_batch_ext_init(llama_context * ctx) {
@@ -1399,6 +1421,10 @@ bool llama_batch_ext_set_output_embd(llama_batch_ext * batch, int32_t idx, bool 
 
 bool llama_batch_ext_set_output_logits(llama_batch_ext * batch, int32_t idx, bool value) {
     return batch->set_output(idx, value);
+}
+
+bool llama_batch_ext_set_prompt(llama_batch_ext * batch, int32_t idx, bool value) {
+    return batch->set_prompt(idx, value);
 }
 
 bool llama_batch_ext_set_decision_order(llama_batch_ext * batch, int32_t idx, llama_decision_order order) {

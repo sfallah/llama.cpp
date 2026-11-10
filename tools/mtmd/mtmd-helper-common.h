@@ -7,6 +7,7 @@
 #include "ggml.h"
 #include "llama.h"
 #include "llama-cpp.h"
+#include "../src/llama-ext.h"
 #include "mtmd.h"
 
 #include <cstdarg>
@@ -162,6 +163,7 @@ struct decode_embd_batch {
                 p[j] = pos[(size_t) j * (size_t) n_tokens + (size_t) i];
             }
             llama_batch_ext_set_pos(batch.get(), idx, p);
+            llama_batch_ext_set_prompt(batch.get(), idx, true);
 
             if (logits[i]) {
                 llama_batch_ext_set_output_logits(batch.get(), idx, true);

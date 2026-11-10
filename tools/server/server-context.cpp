@@ -156,7 +156,7 @@ struct server_batch {
         llama_token token;
         std::array<llama_pos, GGML_MROPE_SECTIONS> pos; // only pos[0] is used for text tokens
         bool output;
-        bool is_prompt; // for stats tracking
+        bool is_prompt; // stats and llama_batch_ext_set_prompt()
         int32_t decision_order = 0;
         int32_t i_embd = -1; // row in embd, -1 if this is a token
     };
@@ -252,6 +252,7 @@ struct server_batch {
                 view.add(t.token, t.pos[0], t.id_slot, t.output);
             }
             view.tokens.back().decision_order = t.decision_order;
+            view.tokens.back().prompt = t.is_prompt;
         }
     }
 };

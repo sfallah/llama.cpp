@@ -408,17 +408,17 @@ bool llama_kv_cache::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
         p1 = std::numeric_limits<llama_pos>::max();
     }
 
-    // removal at or into the prefix [0, n_ref) invalidates the latch; a re-extended
-    // prompt then re-latches at its new boundary on the next single-token decode
-    if (seq_id >= 0) {
-        if (p0 <= n_ref[seq_id]) {
-            n_ref[seq_id] = -1;
+    // the prefix [0, n_ref) shrinks with its cells; removing all of it leaves no prompt
+    const auto trim = [p0, p1](llama_pos & r) {
+        if (p0 < r && p1 >= r) {
+            r = p0 > 0 ? p0 : -1;
         }
+    };
+    if (seq_id >= 0) {
+        trim(n_ref[seq_id]);
     } else {
         for (auto & r : n_ref) {
-            if (p0 <= r) {
-                r = -1;
-            }
+            trim(r);
         }
     }
 
@@ -483,7 +483,7 @@ void llama_kv_cache::seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_id_dst, ll
     GGML_ASSERT(seq_id_src >= 0 && (size_t) seq_id_src < seq_to_stream.size());
     GGML_ASSERT(seq_id_dst >= 0 && (size_t) seq_id_dst < seq_to_stream.size());
 
-    // copy inherits the latched prefix
+    // copy inherits the prefix
     n_ref[seq_id_dst] = n_ref[seq_id_src];
 
     const auto s0 = seq_to_stream[seq_id_src];
@@ -577,7 +577,7 @@ void llama_kv_cache::seq_keep(llama_seq_id seq_id) {
 
     GGML_ASSERT(seq_id >= 0 && (size_t) seq_id < seq_to_stream.size());
 
-    // other seqs are purged -> drop their latched prefix
+    // other seqs are purged -> drop their prefix
     for (uint32_t s = 0; s < LLAMA_MAX_SEQ; ++s) {
         if ((llama_seq_id) s != seq_id) {
             n_ref[s] = -1;
@@ -634,9 +634,9 @@ void llama_kv_cache::seq_add(llama_seq_id seq_id, llama_pos p0, llama_pos p1, ll
         return;
     }
 
-    // the prefix boundary is an absolute pos -> shift it with its cells; a shift below
-    // pos 0 empties the prefix rather than colliding with the -1 unlatched sentinel
-    if (n_ref[seq_id] >= 0 && n_ref[seq_id] >= p0 && n_ref[seq_id] < p1) {
+    // the prefix boundary is an absolute pos -> shift it with its last cell; a shift below
+    // pos 0 empties the prefix rather than colliding with the -1 no-prompt sentinel
+    if (n_ref[seq_id] > p0 && n_ref[seq_id] <= p1) {
         n_ref[seq_id] = std::max(n_ref[seq_id] + shift, 0);
     }
 
@@ -688,7 +688,7 @@ void llama_kv_cache::seq_div(llama_seq_id seq_id, llama_pos p0, llama_pos p1, in
     }
 
     // the boundary is one-past-end -> ceil-divide so the last prefix cell (floored) stays inside
-    if (n_ref[seq_id] >= 0 && n_ref[seq_id] >= p0 && n_ref[seq_id] < p1) {
+    if (n_ref[seq_id] > p0 && n_ref[seq_id] <= p1) {
         n_ref[seq_id] = (n_ref[seq_id] + d - 1) / d;
     }
 
@@ -794,7 +794,7 @@ llama_kv_cache::slot_info_vec_t llama_kv_cache::prepare(const std::vector<llama_
     // remember the old state of the cells so we can restore it in the end
     std::vector<state_t> states;
 
-    // apply_ubatch's R-SWA latch is a side effect that must not survive the dry run
+    // apply_ubatch extends n_ref; that must not survive the dry run
     const auto n_ref_old = n_ref;
 
     bool success = true;
@@ -1141,28 +1141,15 @@ void llama_kv_cache::apply_ubatch(const slot_info & sinfo, const llama_ubatch & 
         return;
     }
 
-    // latch L_m at the prefill->decode boundary: the first single-token append to a
-    // populated seq that requests output. prefill remainders (ubatch-split tails, mtmd
-    // separator chunks) carry no output flag and must not latch mid-prompt. assumes
-    // single-token decode; a prompt whose last ubatch is exactly 1 token latches one
-    // early, and multi-output decode (speculative) is excluded via ref_latch_enabled.
-    if (swa_type == LLAMA_SWA_TYPE_REFERENCE && ref_latch_enabled) {
-        uint32_t n_tok_seq[LLAMA_MAX_SEQ] = { 0 };
+    // prompt tokens extend the always-visible prefix [0, n_ref)
+    if (swa_type == LLAMA_SWA_TYPE_REFERENCE && ubatch.prompt) {
         for (uint32_t i = 0; i < ubatch.n_tokens; ++i) {
-            for (int32_t s = 0; s < ubatch.n_seq_id[i]; ++s) {
-                n_tok_seq[ubatch.seq_id[i][s]]++;
-            }
-        }
-        for (uint32_t i = 0; i < ubatch.n_tokens; ++i) {
-            if (!ubatch.output[i]) {
+            if (!ubatch.prompt[i]) {
                 continue;
             }
             for (int32_t s = 0; s < ubatch.n_seq_id[i]; ++s) {
-                const llama_seq_id seq_id = ubatch.seq_id[i][s];
-                if (n_ref[seq_id] < 0 && n_tok_seq[seq_id] == 1 &&
-                    v_cells[seq_to_stream[seq_id]].seq_pos_max(seq_id) >= 0) {
-                    n_ref[seq_id] = ubatch.pos[i];
-                }
+                auto & r = n_ref[ubatch.seq_id[i][s]];
+                r = std::max(r, ubatch.pos[i] + 1);
             }
         }
     }
@@ -1608,7 +1595,7 @@ struct args_set_input_kq_mask {
     uint32_t       n_swa;
     llama_swa_type swa_type;
 
-    // per-seq R-SWA prefix length L_m (-1 = unlatched), indexed by seq_id
+    // per-seq R-SWA prompt length L_m (-1 = no prompt yet), indexed by seq_id
     const llama_pos * n_ref;
 
     int64_t n_kv;

@@ -2868,7 +2868,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                     type_v = GGML_TYPE_F32;
                     LLAMA_LOG_WARN("%s: promoting V cache type to f32 for R-SWA (pass a quantized -ctv to override)\n", __func__);
                 }
-                auto * kv = new llama_kv_cache(
+                res = new llama_kv_cache(
                         *this,
                         params.no_alloc,
                         hparams,
@@ -2885,10 +2885,6 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                         nullptr,
                         nullptr,
                         nullptr);
-                // the latch infers the prefill->decode boundary from single-token appends,
-                // which multi-output decode (speculative) breaks -> stay full causal there
-                kv->set_ref_latch_enabled(cparams.n_outputs_max_per_seq == 1);
-                res = kv;
             } break;
         case LLM_ARCH_GLM_DSA:
         case LLM_ARCH_DEEPSEEK32:

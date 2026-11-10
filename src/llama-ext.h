@@ -150,6 +150,9 @@ LLAMA_API bool llama_batch_ext_set_decision_order(struct llama_batch_ext * batch
 // Label of option i of a decision model ("<arch>.decision.labels"), nullptr past the last one
 LLAMA_API const char * llama_model_decision_label(const struct llama_model * model, uint32_t i);
 
+// Mark entry idx as a prompt token; R-SWA memory keeps the prompt visible, unflagged entries count as generated
+LLAMA_API bool llama_batch_ext_set_prompt(struct llama_batch_ext * batch, int32_t idx, bool value);
+
 // mirrors:
 // LLAMA_API float * llama_get_embeddings(struct llama_context * ctx);
 LLAMA_API float * llama_get_embeddings_nextn(struct llama_context * ctx);
